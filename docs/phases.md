@@ -1,0 +1,598 @@
+# NaShell 实现阶段划分
+
+每个阶段包含：
+- **目标**：该阶段完成后应达到的状态
+- **参考文档**：指向 `nashell_dev.md`（开发文档）和 `INSTRUCTION.md`（实现说明）的章节
+- **具体任务**：可逐个完成的子任务
+- **验证方式**：如何确认阶段完成
+
+---
+
+## Phase 1: 项目脚手架与配置系统
+
+**目标**：项目可编译运行，能加载并解析配置文件。
+
+### 参考文档
+
+| 内容 | 位置 |
+|------|------|
+| 项目目标与基本设定 | `nashell_dev.md` → 项目目标、基础设定 |
+| 架构总览 | `nashell_dev.md` → 架构总览 |
+| 配置文件完整 Schema | `nashell_dev.md` → 配置文件完整 Schema |
+| 常量定义 | `INSTRUCTION.md` → 五、常量和默认值 |
+| 错误类型 | `INSTRUCTION.md` → 1.4 错误处理 |
+| 配置数据结构 | `INSTRUCTION.md` → 2.6 配置 |
+| 代码风格 | `INSTRUCTION.md` → 一、代码风格 |
+
+### 任务
+
+1. **初始化 Rust 项目**
+   - `cargo init`，配置 `Cargo.toml` 引入核心依赖（`kdl-rs`, `serde`, `serde_json`, `log`, `env_logger`, `dirs`, `tokio`）
+   - 配置 `[profile.release]` 优化选项
+
+2. **创建 `src/constants.rs`**
+   - 定义所有常量（见 `INSTRUCTION.md` 第五章），每个常量必须带文档注释
+   - 禁止魔法数字
+
+3. **创建 `src/error/mod.rs`**
+   - 定义 `NashellError` 枚举
+   - 实现 `std::fmt::Display` 和 `std::error::Error`
+   - 所有 variant 必须有文档注释
+
+4. **创建 `src/config/schema.rs`**
+   - 定义 `NashellConfig` 及所有子结构体
+   - 每个结构体/字段必须有文档注释
+   - 实现 `Default` trait 提供内置默认值
+
+5. **创建 `src/config/loader.rs`**
+   - 实现 KDL 文件解析
+   - 加载优先级：`NASHELL_CONFIG` 环境变量 → `~/.config/nashell/config.kdl` → 默认值
+   - 配置文件不存在时使用默认值，不报错
+   - 解析失败时报告错误但继续使用默认值
+
+6. **创建 `src/main.rs`**
+   - 初始化日志系统
+   - 调用配置加载
+   - 打印加载结果（debug 级别），程序退出
+
+### 验证
+- `cargo build` 成功
+- 创建/修改 `~/.config/nashell/config.kdl` 后运行，日志显示正确的配置值
+- 删除配置文件后运行，日志显示使用默认值
+- 写入无效 KDL 后运行，显示解析错误但程序不崩溃
+
+---
+
+## Phase 2: 核心数据结构 + REPL 骨架
+
+**目标**：所有数据结构定义完毕，REPL 循环可显示提示符并收集单行输入。
+
+### 参考文档
+
+| 内容 | 位置 |
+|------|------|
+| 提示符格式 | `nashell_dev.md` → 基础设定 第4~5条 |
+| 解析数据结构 | `nashell_dev.md` → 执行流 → 参考的解析后数据结构 |
+| NaCommand 数据结构 | `nashell_dev.md` → NaCommand 的分级机制 → 统一数据结构 |
+| Shell 管理数据结构 | `nashell_dev.md` → Shell 管理数据结构 |
+| AppData 数据结构 | `nashell_dev.md` → 完整执行流 → 初始化阶段 |
+| 核心数据结构汇总 | `INSTRUCTION.md` → 二、核心数据结构 |
+| 文件组织规范 | `INSTRUCTION.md` → 1.1 文件组织 |
+| 注释要求 | `INSTRUCTION.md` → 1.2 注释要求 |
+
+### 任务
+
+1. **创建 `src/parser/syntax.rs`**
+   - 定义 `RawCommands`、`RawCmd`、`CmdType`
+   - 每个结构体/枚举必须带文档注释
+
+2. **创建 `src/nacommand/cmd.rs`**
+   - 定义 `NaCommand`、`NaLevel`
+   - 文档注释
+
+3. **创建 `src/shell/cmd.rs` 和 `src/shell/out.rs`**
+   - 定义 `ShellCmd`、`ShellOut` 枚举
+   - 文档注释
+
+4. **创建 `src/shell/actor.rs`**
+   - 定义 `Shell` 结构体（不含 PTY handle，Phase 4 加入）
+   - 文档注释
+
+5. **创建 `src/app/mod.rs`**
+   - 定义 `AppData`、`CmdMeta`、`PluginMeta`、`Level`
+   - 文档注释
+
+6. **创建 `src/config/alias.rs`**
+   - 定义 alias 解析逻辑（`HashMap<String, String>` 的简单展开）
+   - 函数 `expand_alias(input: &str, aliases: &HashMap<String, String>) -> String`
+
+7. **创建 `src/repl/mod.rs`、`src/repl/input.rs`、`src/repl/prompt.rs`**
+   - `prompt.rs`: 根据当前路径生成提示符字符串（格式见 `nashell_dev.md` 基础设定第4条）
+   - `input.rs`: 使用 `rustyline` 实现单行输入（多行暂不做）
+   - `mod.rs`: REPL 循环骨架——显示提示符 → 读取输入 → 打印（占位逻辑）→ 循环
+
+8. **更新 `src/main.rs`**
+   - 构造 `AppData`（目前所有 Vec 为空）
+   - 调用 REPL 循环
+
+### 验证
+- `cargo build` 成功，`cargo run` 进入 REPL
+- 提示符正确显示当前路径和 `|>` 符号
+- 输入文本后按 Enter 回显（占位），继续等待输入
+- 输入 `exit` 退出程序
+
+---
+
+## Phase 3: 命令解析器
+
+**目标**：完整解析用户输入为 `RawCommands` 结构体，支持多行输入、`@/` 截止符、管道分割、命令类型识别。
+
+### 参考文档
+
+| 内容 | 位置 |
+|------|------|
+| 多行输入格式 | `nashell_dev.md` → 基础设定 第4条 |
+| 执行流阶段 0~4 | `nashell_dev.md` → 执行流 → 阶段 0 ~ 阶段 4 |
+| 解析流程 | `INSTRUCTION.md` → 3.2 解析流程 |
+| 文件组织 | `INSTRUCTION.md` → 1.1 文件组织 (parser/) |
+
+### 任务
+
+1. **创建 `src/parser/lexer.rs`**
+   - `tokenize(input: &str) -> Result<Vec<Token>, NashellError>`: 将原始输入转为 token 流
+   - Token 类型包括：前缀标记（`!@`/`!!@`/`!`）、命令词、参数、管道 `|`、截止符 `@/`、引号字符串
+   - 实现 `detect_bash_shortcut(input: &str) -> Option<String>`: 检测 `!!@Bash:` 前缀，返回 Bash 参数
+   - 实现 `detect_async_marker(first_line: &str) -> Option<String>`: 检测 `@/Async(name)`，返回 name
+   - 正确处理引号内内容（引号内的 `|`、`@/` 不被识别为分隔符）
+
+2. **创建 `src/parser/long_arg.rs`**
+   - `extract_long_argument(input: &str) -> Result<(String, Option<String>), NashellError>`:
+     - 规则 A（优先）：查找 `@/`，之前的内容为命令语句，之后的内容为 long_argument
+     - 规则 B（回退）：无 `@/` 时查找首个空行分割
+     - 规则 C：两项皆无，long_argument 为 None
+   - 返回 `(命令语句部分, long_argument)`
+
+3. **创建 `src/parser/pipeline.rs`**
+   - `split_pipeline(cmd_part: &str) -> Result<Vec<String>, NashellError>`: 按 `|` 分割命令段
+   - 保护引号内的 `|`
+
+4. **创建 `src/parser/mod.rs`**
+   - `parse(input: &str) -> Result<RawCommands, NashellError>`: 完整解析流程
+   - 整合 lexer → long_arg → pipeline 各步骤
+   - 填充 `RawCommands.commands`（识别每个段的 `CmdType`）、`long_argument`、`async_name`
+
+5. **更新 `src/repl/input.rs`**
+   - 实现多行输入：首行 `|>` 提示符，后续行 `>>` 提示符
+   - 收集所有行直到用户输入空行（仅回车）或输入 `@/` 后按 Enter 结束输入
+   - 多行输入时首行自动检测：若首行末尾有 `@/` → 自动进入多行模式
+
+6. **更新 REPL 循环**
+   - 输入收集后调用 `parse()` 并打印解析结果（debug 级别日志）
+
+### 验证
+- 单行输入 `ls -la` → 解析为 1 个 `Shell` 类型命令
+- 多行输入 `!@Write:./test.py @/` + 多行内容 → 正确提取 long_argument
+- `!@Open:./src -l 200` → 识别为 `NaCommandNormal`，cmd=`open`
+- `!!@Shell:Watch -i "abc" -c 3` → 识别为 `NaCommandSystem`，cmd=`shell`，mode=`watch`
+- `ls | grep foo` → 按管道分割为 2 个 `Shell` 命令段
+- `ls | !@Write:./out.txt @/` → 管道分割正确，long_argument 被提取
+- 引号内的 `|` 不被分割
+- `!!@Bash: ls -la` → Bash shortcut 检测生效
+
+---
+
+## Phase 4: Shell 管理 (PTY)
+
+**目标**：启动 PTY 持久 shell，支持 PTY 交互执行和 `-c` 捕获执行两种模式。
+
+### 参考文档
+
+| 内容 | 位置 |
+|------|------|
+| PTY 持久化方案 | `nashell_dev.md` → 架构总览 → PTY 持久化方案说明 |
+| PTY vs -c 配合 | `nashell_dev.md` → Shell 命令执行（PTY 与 -c 的配合） |
+| Shell 管理数据结构 | `nashell_dev.md` → Shell 管理数据结构 |
+| Shell 命令执行流 | `INSTRUCTION.md` → 3.3 Shell 命令执行流 |
+| 线程模型 | `INSTRUCTION.md` → 4.2 线程模型 |
+| channel 通信 | `INSTRUCTION.md` → 4.3 channel 通信 |
+| Shell 数据结构 | `INSTRUCTION.md` → 2.3 Shell 管理 |
+
+### 任务
+
+1. **创建 `src/shell/pty.rs`**
+   - `spawn_pty(shell_type: &str) -> Result<PtyHandle, NashellError>`: 创建 PTY 并启动 `nu` 或 `bash`
+   - `resize_pty(handle: &PtyHandle, cols: u16, rows: u16) -> Result<(), NashellError>`: 调整 PTY 窗口大小
+   - `write_to_pty(handle: &PtyHandle, input: &str) -> Result<(), NashellError>`: 写入命令文本
+   - `read_from_pty(handle: &PtyHandle) -> Result<String, NashellError>`: 非阻塞读取输出
+   - PTY 退出时自动检测并返回错误
+
+2. **创建 `src/shell/cwd_sync.rs`**
+   - `sync_cwd(shell: &Shell) -> Result<PathBuf, NashellError>`: 轮询 `/proc/{pid}/cwd` 获取当前工作目录
+   - 或者监听 PTY 输出中的 OSC 7 转义序列
+   - 返回当前工作路径，用于更新提示符
+
+3. **创建 `src/shell/manager.rs`**
+   - `ShellManager` 结构体：管理 main shell + async shells（`HashMap<String, Shell>`）
+   - `init_main_shell() -> Result<Shell, NashellError>`: 启动 main PTY
+   - `send_cmd(shell: &Shell, cmd: ShellCmd) -> Result<(), NashellError>`: 发送命令
+   - `recv_out(shell: &Shell) -> Result<ShellOut, NashellError>`: 接收输出
+   - `destroy_shell(name: &str) -> Result<(), NashellError>`: 销毁指定 shell
+   - `create_async_shell(name: &str) -> Result<Shell, NashellError>`: 创建异步 shell
+
+4. **创建 `src/executor/shell_exec.rs`**
+   - `exec_pty(input: &str, shell: &Shell) -> Result<String, NashellError>`: 在 PTY 中交互执行
+   - `exec_captured(cmd: &str, args: &[String], shell_type: &str) -> Result<CapturedOutput, NashellError>`: 通过 -c 捕获执行
+   - `CapturedOutput` 结构体：stdout、stderr、exit_code
+
+5. **创建 `src/executor/mod.rs`**
+   - 初始化 executor，持有 `ShellManager`
+   - 分派函数 `dispatch(cmd: &RawCmd, ctx: &ExecContext) -> Result<String, NashellError>`（Phase 5 完善 NaCommand 分支）
+
+6. **更新 `src/app/init.rs`**
+   - 检测 `nu` 可用性：`which nu` 或尝试运行 `nu --version`
+   - 不在 `config.kdl` 中，运行时自动检测
+   - 确定 shell_type: `"nu"` 或 `"bash"`
+
+### 验证
+- 启动程序，main PTY shell 运行正常
+- 输入 `ls -la` → 通过 PTY 实时显示目录内容
+- 输入 `cd /tmp` → PTY 内部切换目录，提示符路径更新
+- 输入 `pwd` → 显示正确的当前路径
+- `echo "hello"` → 实时输出 hello
+- 非零退出码命令（如 `ls /nonexistent`）→ 显示错误但不崩溃
+- PTY 退出异常 → 尝试自动重启 main shell
+
+---
+
+## Phase 5: NaCommand 执行引擎
+
+**目标**：内置 NaCommand（Write、Open）及 Help 模式可正常工作。
+
+### 参考文档
+
+| 内容 | 位置 |
+|------|------|
+| Write 命令 | `nashell_dev.md` → Write |
+| Open 命令 | `nashell_dev.md` → Open |
+| Help 模式 | `nashell_dev.md` → Help 模式 |
+| NaCommand 数据结构 | `nashell_dev.md` → NaCommand 的分级机制 |
+| 查表逻辑 | `INSTRUCTION.md` → 3.4 NaCommand 执行流 |
+| 执行分派 | `INSTRUCTION.md` → 3.1 主循环数据流 (NaCmd 分支) |
+
+### 任务
+
+1. **创建 `src/nacommand/registry.rs`**
+   - `CommandRegistry` 结构体：管理所有注册的命令
+   - `register_builtin()`: 注册 Write、Open 等内置命令
+   - `lookup(cmd_name: &str) -> Result<&CmdMeta, NashellError>`: 查表（内置 → 配置 → 插件）
+   - `get_help(cmd_name: &str, mode: Option<&str>) -> Result<String, NashellError>`: 获取帮助信息
+
+2. **创建 `src/nacommand/builtin/write.rs`**
+   - 实现 Write 命令逻辑（见 `nashell_dev.md` Write 章节）
+   - 检查父目录存在性
+   - long_argument 为 None 时创建空文件/清空文件
+   - 返回格式：`write to {abs_path} ({bytes} bytes)`
+
+3. **创建 `src/nacommand/builtin/open.rs`**
+   - 实现 Open 命令逻辑（见 `nashell_dev.md` Open 章节）
+   - 路径为目录：输出目录结构树
+   - 路径为文件：按行号输出内容，支持 `--limit`/`--start`/`--end`
+   - 目录时传入文件选项参数应报错
+   - 考虑语法高亮（使用 `syntect`）
+
+4. **创建 `src/nacommand/builtin/mod.rs`**
+   - 注册 Write、Open 到 CommandRegistry
+
+5. **创建 `src/nacommand/mod.rs`**
+   - `execute_nacommand(cmd: &NaCommand, pre_out: Option<String>, registry: &CommandRegistry) -> Result<String, NashellError>`:
+     - 查表找到命令处理器
+     - 构建完整 NaCommand（合并 long_argument 和 pre_out）
+     - 调用对应 handler
+
+6. **更新 `src/executor/mod.rs`**
+   - `dispatch()` 完善 NaCommandNormal / NaCommandSystem 分支
+   - 调用 `nacommand::execute_nacommand()`
+
+### 验证
+- `!@Write:./test.txt @/` + 内容 → 文件创建成功
+- `!@Write:./test.txt @/` + 多行内容 → 内容正确写入，缩进格式保留
+- `!@Write:./nonexistent/file.txt @/` + 内容 → 报错（父目录不存在）
+- `!@Open:./src` → 显示目录结构
+- `!@Open:./src/main.rs -l 50` → 显示前 50 行
+- `!@Write:Help` → 显示 Write 命令帮助
+- `!@Open:Help` → 显示 Open 命令帮助
+
+---
+
+## Phase 6: System 级命令
+
+**目标**：`!!@Bash:` 和 `!!@Shell:` 命令完整可用，`@/Async` 异步执行可用。
+
+### 参考文档
+
+| 内容 | 位置 |
+|------|------|
+| Bash 命令 | `nashell_dev.md` → Bash |
+| Shell 命令（Watch/Destroy/Switch） | `nashell_dev.md` → Shell |
+| @/Async 异步执行 | `nashell_dev.md` → @/Async(name) 异步 Shell 执行 |
+| Bash shortcut 检测 | `INSTRUCTION.md` → 3.2 解析流程 → 阶段 1 |
+
+### 任务
+
+1. **创建 `src/nacommand/builtin/bash.rs`**
+   - 实现 Bash 命令逻辑
+   - 参数直接传给 `bash -c`（不经过管道分割）
+   - 实时输出，输出开头用亮黄色标记 `Bash:`
+   - 支持 `@/Async(name)` 异步执行——创建临时 bash 子进程，不持久化
+
+2. **创建 `src/nacommand/builtin/shell_cmd.rs`**
+   - Shell 命令的四种模式实现：
+     - 默认（无 mode）：获取所有 Shell 状态，表格输出
+     - Watch: 查看指定 shell 的 pools，支持 `-i` / `-c`
+     - Destroy: 销毁指定 shell，支持 `-i`
+     - Switch: 切换 main shell，支持 `-i` / `-d`
+
+3. **创建 `src/executor/async_exec.rs`**
+   - `spawn_async_shell(name: &str, command: &str) -> Result<Shell, NashellError>`:
+     - 创建新 PTY shell 线程
+     - 在新的 ShellActor 中解析并执行命令
+     - 结果写入 pools
+     - 返回创建确认信息
+
+4. **更新 `src/parser/lexer.rs` 和 `src/executor/mod.rs`**
+   - `@/Async(name)` 的完整链路：解析器标记 `async_name` → 执行器在阶段 7 处理
+   - 主命令执行完毕后再启动异步 shell
+
+5. **更新 `src/shell/manager.rs`**
+   - 实现 `watch_pools(id: &str, count: usize) -> Result<Vec<String>, NashellError>`
+   - 实现 `switch_main(id: &str, destroy_old: bool) -> Result<(), NashellError>`
+
+### 验证
+- `!!@Bash: ls -la` → bash 执行，输出带亮黄色 Bash: 标识
+- `!!@Shell:` → 显示所有 shell 状态表格
+- `!!@Shell:Watch -i "xxx" -c 2` → 显示对应 shell 的最近 2 条 pools
+- `!!@Shell:Destroy -i "xxx"` → 销毁成功
+- `!!@Shell:Switch -i "xxx" -d` → 切换 main shell 并销毁旧 shell
+- `ls -la @/Async(test)` → 异步执行，立即返回确认，pools 中有结果
+- `!!@Bash: ls -la @/Async(back)` → Bash 异步执行
+
+---
+
+## Phase 7: 交互命令 + Alias
+
+**目标**：`!cmd` 交互命令可以接管终端执行，alias 解析生效。
+
+### 参考文档
+
+| 内容 | 位置 |
+|------|------|
+| 交互命令 | `nashell_dev.md` → !cmd 交互命令 |
+| Alias 配置 | `nashell_dev.md` → alias 配置格式 |
+| Alias 解析 | `INSTRUCTION.md` → 任务 6（config/alias.rs） |
+
+### 任务
+
+1. **创建 `src/executor/interactive_exec.rs`**
+   - `exec_interactive(cmd: &RawCmd, aliases: &HashMap<String, String>) -> Result<(), NashellError>`:
+     - 展开 alias（如果匹配）：`!shx` → `sudo hx --config ~/helix`
+     - 检查是否有管道/重定向，有则报错拒绝
+     - 检查是否含 `!!@` / `!@`，有则报错
+     - 若有 `sudo` 前缀：通过 PTY 执行 `sudo -v`，然后 exec 目标程序
+     - 若在 PTY 中：需要临时接管终端（通过 `SIGSTOP`/`SIGCONT` 协调）
+     - 退出后恢复 PTY 交互
+
+2. **更新 `src/config/alias.rs`**
+   - 完善 alias 展开：支持递归 alias（展开结果可匹配其他 alias，最多 5 层）
+   - 返回值类型 `Result<String, NashellError>`
+
+3. **更新 `src/executor/mod.rs`**
+   - `dispatch()` 完善 Interactive 分支
+
+### 验证
+- `!vim test.txt` → 打开 vim，退出后回到 NaShell
+- `!hx src/main.rs` → 打开 helix，退出后回到 NaShell
+- 配置 `shx="sudo hx --config ~/helix"`，输入 `!shx` → 执行 sudo helix
+- `!vim test.txt | grep foo` → 报错拒绝
+- `!vim test.txt @/Async(x)` → 报错拒绝
+
+---
+
+## Phase 8: 插件系统
+
+**目标**：完整插件生命周期管理——加载、通信、执行、关闭。
+
+### 参考文档
+
+| 内容 | 位置 |
+|------|------|
+| 插件通信协议 | `nashell_dev.md` → 插件系统 → 通信协议 |
+| 消息类型 | `nashell_dev.md` → 插件系统 → 消息类型 |
+| 插件配置与注册 | `nashell_dev.md` → 插件系统 → 插件配置与注册 |
+| toExec 递归限制 | `nashell_dev.md` → 插件系统 → toExec 递归限制 |
+| 插件协议数据结构 | `INSTRUCTION.md` → 2.5 插件协议 |
+| 插件通信流 | `INSTRUCTION.md` → 3.5 插件通信流 |
+| 线程模型 | `INSTRUCTION.md` → 4.2 线程模型 |
+
+### 任务
+
+1. **创建 `src/plugin/protocol.rs`**
+   - 定义所有消息结构体（`PluginCall`、`PluginResponse`、`PluginOff`、`PluginBroadcast`）
+   - 实现 `serde::Serialize` / `serde::Deserialize`
+   - `send_message(writer: &mut impl Write, msg: &PluginMessage) -> Result<(), NashellError>`: 序列化并写入一行 NDJSON
+   - `recv_message(reader: &mut impl BufRead) -> Result<PluginMessage, NashellError>`: 读取一行并反序列化
+   - `PluginMessage` 枚举包含所有消息类型
+
+2. **创建 `src/plugin/manifest.rs`**
+   - `load_manifest(path: &Path) -> Result<PluginMeta, NashellError>`: 解析 manifest.json
+   - `scan_plugins(dir: &Path) -> Result<Vec<PluginMeta>, NashellError>`: 扫描插件目录
+
+3. **创建 `src/plugin/manager.rs`**
+   - `PluginManager` 结构体：管理所有插件进程
+   - `start_plugin(meta: &PluginMeta) -> Result<PluginHandle, NashellError>`: 启动插件进程
+   - `send_call(handle: &PluginHandle, call: &PluginCall) -> Result<(), NashellError>`: 发送 call 消息
+   - `recv_responses(handle: &PluginHandle) -> Result<Vec<PluginResponse>, NashellError>`: 接收 response 直到 off
+   - `stop_plugin(handle: &PluginHandle) -> Result<(), NashellError>`: 关闭插件进程
+   - 超时处理（`PLUGIN_TIMEOUT_SECS` 秒无响应则强制关闭）
+
+4. **创建 `src/plugin/toexec.rs`**
+   - `execute_toplevel(to_exec: &[String], depth: u32, ctx: &ExecContext) -> Result<Vec<String>, NashellError>`:
+     - 按顺序逐条执行命令
+     - 每条命令走完整解析+执行流程（模拟用户输入）
+     - 深度计数：每次 toExec 调用 `depth + 1`
+     - 超过 `TOEXEC_MAX_DEPTH` 后：NaCommand 报错拒绝，仅允许纯 shell 命令
+   - `ExecContext` 包含当前深度、ShellManager、CommandRegistry 等
+
+5. **创建 `src/plugin/broadcast.rs`**
+   - `broadcast_event(event: &str, payload: serde_json::Value, plugins: &[PluginHandle])`: 向所有 is_broadcast 插件发送消息
+   - 在主程序的事件触发点调用（如 shell 切换、cwd 变更）
+
+6. **更新 `src/nacommand/registry.rs`**
+   - 查表加入插件命令匹配（在配置命令之后，内置命令之后）
+   - 匹配到插件命令时 → 调用 `PluginManager::send_call()` → 等待 response/off → 返回结果
+
+7. **更新 `src/app/init.rs`**
+   - 启动时启动所有 `is_broadcast: true` 的插件并保活
+
+### 验证
+- 创建测试插件（一个简单脚本，接收 NDJSON call，返回 response + off）
+- 注册插件命令，调用该命令 → 正确返回结果
+- 插件 response 中 `is_print: true` → 内容正确打印
+- 插件 `to_exec` 中的 shell 命令 → 正确执行，结果填入 exec_result
+- 插件 `to_exec` 递归超过 3 层 → NaCommand 被拒绝
+- 插件超时 30 秒无响应 → 强制关闭，报错
+- 广播事件 → 所有 is_broadcast 插件收到消息
+
+---
+
+## Phase 9: 外部配置命令
+
+**目标**：用户在 `config.kdl` 中配置的 NaCommand 可正常调用。
+
+### 参考文档
+
+| 内容 | 位置 |
+|------|------|
+| 用户外部命令配置 | `nashell_dev.md` → 用户外部命令自行配置 |
+| NaCommands 配置块 | `nashell_dev.md` → 配置文件完整 Schema → NaCommands |
+| 外部命令执行 | `INSTRUCTION.md` → 3.4 NaCommand 执行流 → 外部命令 |
+
+### 任务
+
+1. **创建 `src/nacommand/external.rs`**
+   - `execute_external(cmd_meta: &CmdMeta, nacommand: &NaCommand) -> Result<String, NashellError>`:
+     - 若无 `exec_script`：long_argument 作为字符串传给 exec 程序的最后一个参数
+     - 若有 `exec_script`：long_argument 保存为 `/tmp/nashell/{random}.{ext}` 临时文件，临时文件路径作为 exec 的参数
+     - 执行结束后删除临时脚本文件（无论成功与否）
+     - 执行 `cmd_meta.exec` 程序，捕获 stdout + stderr，保留 ANSI 码
+   - Help 模式：对 exec 程序传入 `--help`，透传输出
+
+2. **更新 `src/nacommand/registry.rs`**
+   - 查表加入配置命令匹配（在内置命令之后，插件命令之前）
+
+3. **更新 `src/app/init.rs`**
+   - 从配置中加载 `NaCommands` 到 `AppData.config_cmds`
+
+### 验证
+- 在 config.kdl 中配置一个 NaCommand，如 `websearch exec="nu ./web_search.nu" long_argument=false`
+- 调用 `!@WebSearch: -q "test"` → 正确执行 `nu ./web_search.nu -q test`
+- 配置带 exec_script 的命令，验证临时脚本生成和清理
+- `!@WebSearch:Help` → 透传 `--help` 输出
+
+---
+
+## Phase 10: 错误处理、信号处理与退出
+
+**目标**：所有错误路径覆盖完毕，信号处理健壮，退出清理完整。
+
+### 参考文档
+
+| 内容 | 位置 |
+|------|------|
+| 错误处理 | `nashell_dev.md` → 错误处理 |
+| 退出与信号处理 | `nashell_dev.md` → 退出与信号处理 |
+| 输出截断 | `nashell_dev.md` → 输出截断策略 |
+| 错误类型定义 | `INSTRUCTION.md` → 1.4 错误处理 |
+| 错误显示格式 | `INSTRUCTION.md` → 六、实现注意事项 第7条 |
+
+### 任务
+
+1. **创建 `src/error/display.rs`**
+   - `format_error(err: &NashellError) -> String`: 格式化错误为 `@Error #>>\n{类型}: {描述}` 格式
+   - 不同错误类型的不同描述模板
+
+2. **完善全局错误处理**
+   - 审查所有 `?` 调用点，确保错误信息包含足够上下文
+   - 所有 `match` 分支的 `None` 情况返回带上下文的错误
+   - 配置文件缺失/损坏时优雅降级
+
+3. **实现信号处理**
+   - `SIGINT` (Ctrl+C)：中断当前执行中的命令，回到输入提示符
+   - `SIGWINCH`：更新 PTY 窗口大小，保持提示符渲染正确
+   - `SIGTERM` / `SIGHUP`：优雅退出
+   - 连续两次 Ctrl+C：强制退出
+
+4. **实现退出清理**
+   - `exit` 命令和 Ctrl+D 处理
+   - 清理顺序：插件 off → 异步 shell Destroy → main shell 关闭 → 临时文件清理 → 退出
+   - 清理失败不阻塞退出（记录警告日志）
+
+5. **输出截断**
+   - `-c` 捕获模式下不截断
+   - Open 命令按 `--limit` 截断
+
+### 验证
+- 错误命令（如 `!@UnknownCmd:`）→ 显示明确的错误信息
+- 配置文件损坏 → 显示解析错误但程序正常启动
+- Ctrl+C 中断正在执行的 `sleep 30` → 回到提示符
+- 调整终端窗口大小 → 提示符和 PTY 输出正确响应
+- `exit` / Ctrl+D → 程序正常退出，无残留子进程
+- 检查退出后 `/tmp/nashell/` 无残留临时文件
+
+---
+
+## Phase 11: 集成测试与打磨
+
+**目标**：端到端测试覆盖核心功能路径，边缘情况处理完善。
+
+### 参考文档
+
+| 内容 | 位置 |
+|------|------|
+| 全部功能定义 | `nashell_dev.md` 全文 |
+| 全部实现规范 | `INSTRUCTION.md` 全文 |
+
+### 任务
+
+1. **单元测试**
+   - 解析器：各种输入格式的解析正确性
+   - NaCommand：Write/Open/Bash/Shell 各命令的正确性
+   - 插件协议：消息序列化/反序列化
+   - 配置加载：各种配置文件的解析
+
+2. **集成测试**
+   - 完整管道执行：`ls | !@Write:./out.txt @/` + 验证文件内容
+   - 多行输入 + NaCommand：`!@Write:./test.py @/` + Python 代码
+   - 异步执行：`echo hello @/Async(test)` + `!!@Shell:Watch` 验证
+   - Shell Switch：创建异步 shell，切换到它，切回 main
+   - 插件完整流程：注册 → call → response → toExec → off
+
+3. **边缘情况**
+   - 空输入（直接 Enter）
+   - 超长输入（1000+ 行 long_argument）
+   - 特殊字符在命令中（Unicode、emoji）
+   - 嵌套引号（`"it's \"ok\""`）
+   - 路径中有空格（`!@Open:"./my files/doc.txt"`）
+
+4. **性能**
+   - REPL 循环延迟应 < 50ms（不含命令执行时间）
+   - PTY 输出透传延迟应 < 10ms
+   - 大量输出时内存使用稳定（不发生泄漏）
+
+5. **文档**
+   - 代码中文档注释覆盖率 100%
+   - README.md 包含安装和使用说明
+
+### 验证
+- `cargo test` 全部通过
+- `cargo clippy` 无警告
+- 所有 Phase 1~10 的验证项回归通过
