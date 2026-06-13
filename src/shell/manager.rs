@@ -1,14 +1,7 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::mpsc;
-use std::sync::mpsc::Receiver;
-use std::thread;
 
 use crate::error::NashellError;
 use crate::shell::actor::Shell;
-use crate::shell::cmd::ShellCmd;
-use crate::shell::cwd_sync::sync_cwd_by_pid;
-use crate::shell::out::ShellOut;
 use crate::shell::pty::{spawn_pty_session, PtySession};
 
 /// Shell 管理器，维护 main shell 和所有异步 shell。

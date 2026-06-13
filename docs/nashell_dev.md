@@ -39,9 +39,14 @@ NaShell 主进程
 │   ├── 语法分析: 构建 RawCommands → Vec<RawCmd>
 │   └── long_argument 提取 (优先 @/, 次选空行)
 ├── 命令分发与执行引擎
-│   ├── Shell 命令 → PTY ShellActor (通过 channel)
-│   ├── NaCommand → 内置执行 / 外部程序 / 插件调用
-│   └── 管道编排: 按顺序执行, 静默捕获中间输出
+│   ├── 直连模式 (should_use_direct): Shell/Interactive 命令 → Stdio::inherit 直连终端
+│   │   └── cd 命令由 Rust 进程直接拦截 (std::env::set_current_dir)
+│   ├── Captured 模式: 管道/异步/Bash → script -e -q -c 捕获执行
+│   │   ├── 普通 Shell 命令 → exec_captured (shell -c wrapped by script PTY)
+│   │   ├── !!@Bash: 命令 → exec_bash (bash -c wrapped by script PTY)
+│   │   └── 管道编排: 逐段捕获, pre_out 传递
+│   ├── NaCommand → 内置执行 / 外部程序 / 插件调用 (Phase 5+)
+│   └── 安全拦截: check_safety() 在直连和 Captured 模式执行前检查 deny_patterns
 ├── Shell 管理器 (PTY)
 │   ├── main PTY (portable-pty, 主工作环境)
 │   ├── 异步 ShellActor (tokio task, 独立 PTY)
@@ -91,10 +96,19 @@ NaShell 主进程
 
 6. 在命令输入中除了使用了 `NaCommand` 和交互命令之外的语句/内容都作为 Shell 命令执行
 
-7. PTY 执行策略（解决了实时输出与捕获的矛盾）：
-   - **在 PTY 中交互执行**（实时输出，用户可看到进度）：当整条命令不含任何 NaCommand 且不含任何管道 `|` 时，直接在 main PTY 中执行
-   - **通过 `-c` 捕获执行**（静默捕获，用于管道传递）：当整条命令含有 NaCommand 时，管道中所有 shell 命令改用 `nu -c` / `bash -c` 捕获输出，静默传递；只有管道末端的最终结果才打印显示
-   - **混合管道中的纯 shell 链**：当管道中不含任何 NaCommand 但不方便在 PTY 中交互（如末尾有 `@/` ），同样用 `-c` 执行
+7. 命令执行策略（双模式）：
+
+   **直连模式**（单一命令、无管道、无异步、非 Bash）：
+   - 子进程 stdin/stdout/stderr 全部继承 NaShell 进程的真实终端
+   - 支持实时进度输出（curl、git clone）和交互输入（python REPL、read、TUI）
+   - cd 由 Rust 进程通过 `std::env::set_current_dir()` 直接拦截处理
+   
+   **Captured 模式**（有管道 | / @/Async / !!@Bash:）：
+   - 通过 `script -e -q -c "{shell} -c '{command}'" /dev/null` 在一次性 PTY 中执行
+   - stdout/stderr 通过 pipe 捕获，用于管道传递或格式化输出
+   - `script` 提供 TTY 环境 + `TERM=xterm-256color`，解决 TTY 检测问题
+   - `Stdio::inherit()` 传真实终端 stdin，确保 script 能获取终端尺寸
+   - 命令结束 script 自动退出，无哨兵/状态机
 
 ## 执行流（从输入到提交）
 
@@ -217,29 +231,44 @@ NaShell 主进程
   }
 ```
 
-## Shell 命令执行（PTY 与 -c 的配合）
+## Shell 命令执行（直连 / Captured 双模式）
 
-### PTY 交互执行场景
+### 直连模式（`exec_shell_direct`）
 
-以下情况直接在 main PTY 中交互执行，用户看到实时输出：
-1. 整条输入不含任何 `!@` / `!!@` 命令
-2. 整条输入不包含管道 `|`
-3. 末尾无 `@/` 截止符（或虽有 `@/` 但无后续内容，且无 long_argument）
+条件：整条输入 = 单一命令 ∧ 无管道 `|` ∧ 无 `@/Async` ∧ 非 `!!@Bash:`
 
-这种情况下，输入原文去掉首行开头的空格后，直接发往 PTY 的 stdin，PTY 的 stdout 实时透传到用户终端。
+```
+Rust Command → {shell} -c '{command}'  (stdio 全部 inherit)
+```
 
-### -c 捕获执行场景
+- stdin/stdout/stderr 全部继承自父进程，子进程直接读写真实终端
+- 适用于 **实时输出**（curl 进度、git clone 百分比）和 **交互式输入**（python REPL、read、TUI）
+- `cd` 命令由 Rust 进程拦截，不经过此路径
+- `!cmd` 语法降级为可选项：普通 shell 命令也能直接运行 vim、htop 等 TUI 程序
 
-以下情况使用 `nu -c` / `bash -c` 执行并捕获输出（静默）：
-1. 管道链中含有任何 NaCommand
-2. 管道链中不含 NaCommand 但存在 `@/` 截止符且需要捕获输出作为后续使用
-3. 命令需要在异步 shell 中执行（`@/Async(name)`）
+### Captured 模式（`exec_captured`）
 
-此时 shell 命令的输出被完整捕获为 String，保留 ANSI 彩色码，传递给管道中的下一段。
+条件：有管道 `|` / 有 `@/Async` / `!!@Bash:`
 
-### 管道中的纯 shell 链优化
+```
+Rust Command → script -e -q -c "{shell} -c '{command}'" /dev/null
+```
 
-若管道分割后确认整个管道链不含任何 NaCommand（所有段都是普通 shell 命令），去掉末尾的 `@/`（若有）后，将整个管道表达式直接通过 `nu -c` / `bash -c` 执行，不再逐段分割。这利用了 shell 原生的管道机制，避免不必要的中间处理。
+- `script` 分配伪终端，命令感知到 TTY 后正常输出彩色
+- stdout/stderr 通过 pipe 捕获为 String，保留 ANSI 彩色码
+- 捕获的输出用于管道传递（pre_out → 下一命令段）或格式化打印
+- 退出码通过 `script -e` 正确传递
+- 支持超时机制：超时后 SIGTERM → SIGKILL 终止子进程
+
+### Bash 命令（`exec_bash`）
+
+`!!@Bash:` 专用路径——直接构造 `bash -c '{args}'` 不经过双层 shell 包装。
+输出使用亮黄色 `Bash:` 标识（来自 `bash_output_prompt_fg` 配置）。
+
+### 管道执行
+
+管道中存在 NaCommand 时，逐段通过 Captured 模式执行，前段输出（pre_out）传入后段。
+纯 shell 管道（不含 NaCommand）可整体交给 shell 原生管道处理（优化，尚未实现）。
 
 ### Shell 管理数据结构
 

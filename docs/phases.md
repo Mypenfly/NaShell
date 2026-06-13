@@ -217,68 +217,114 @@
 
 ---
 
-## Phase 4: Shell 管理 (PTY)
+## Phase 4: Shell 管理 (PTY) + 执行双模式 ✅ 已完成
 
-**目标**：实现 shell 命令执行，支持持久状态（cd）和 TTY 感知输出。
+**目标**：实现 shell 命令执行，支持持久状态（cd）、TTY 感知输出、实时交互和输出捕获双模式。
 
-**设计决策**：Phase 4 采用**方案 B：`script -e -q -c` 一次性 PTY** 而非持久 PTY 会话。
+**设计决策**：采用**双模式执行架构**——直连模式（Stdio::inherit）与 Captured 模式（`script -e -q -c`）按需切换。
 
-原因：
-- 持久 PTY（`portable-pty`）需要哨兵机制检测命令完成，在 `.bashrc` 的 `PROMPT_COMMAND` 干扰下不可靠
-- `script -e -q -c` 是 Unix 标准工具，命令结束进程自动退出，无需哨兵/状态机
-- 对 `cd` 命令，由 Rust 进程通过 `std::env::set_current_dir()` 直接切换并更新提示符
-- 颜色输出：`script` 提供 TTY 环境 + `TERM=xterm-256color`，解决 eza/ls 等工具的 TTY 检测问题
-- nushell 表格：使用 `Stdio::inherit()` 传真实终端 stdin，`script` 从中获取尺寸并正确设置 PTY 大小
-- 退出码：`script -e` 传递子进程退出码
+**直连模式**（`exec_shell_direct`）：单一命令、无管道、无 @/Async、非 !!@Bash: 时使用。
+- `{shell} -c '{command}'` 全部 stdio 继承父进程，子进程直连真实终端
+- 支持实时进度输出（curl、git clone）、交互输入（python REPL、read、TUI 程序）
+- `cd` 由 Rust 直接拦截处理，不经过子进程
 
-执行链路：`Rust spawn → script -e -q -c "{shell} -c '{command}'" /dev/null`
+**Captured 模式**（`exec_captured`）：有管道 / @/Async / !!@Bash: 时使用。
+- `script -e -q -c "{shell} -c '{command}'" /dev/null`，stdout/stderr 通过 pipe 捕获
+- `script` 分配伪终端解决 eza/ls 等工具的 TTY 检测问题
+- 使用 `Stdio::inherit()` 传真实终端 stdin 确保 PTY 尺寸正确（nushell 表格）
+- `script -e` 传递退出码，命令结束进程自动退出
+
+**Bash 命令**（`exec_bash`）：
+- 直接 `script ... "bash -c '{args}'"` 执行，避免与 `exec_captured` 的内层 `{shell} -c` 嵌套
+- 输出使用亮黄色 `Bash:` 标识
+
+额外实现（超出原始 Phase 4 范围）：
+- Shell 类型输出标识（`@nu #>>` / `@bash #>>` 带颜色）
+- 启动时 opening 显示（`opening.exec` / `opening.file`）
+- Shell 命令超时机制（`wait_child_with_timeout`，超时后 SIGTERM→SIGKILL）
+- 安全拦截检查（`check_safety`，匹配 `deny_patterns`）
+- 输出错误统一格式化（`@Error #>>\n{类型}: {描述}`）
 
 ### 参考文档
 
 | 内容 | 位置 |
 |------|------|
 | `script` 方案说明 | 本文件 Phase 4 设计决策 |
+| 直连/Captured 双模式 | `INSTRUCTION.md` → 3.3 Shell 命令执行流 |
 | PTY 持久化方案（后续 Phase 再用） | `nashell_dev.md` → 架构总览 → PTY 持久化方案说明 |
 | Shell 管理数据结构 | `nashell_dev.md` → Shell 管理数据结构 |
-| Shell 命令执行流 | `INSTRUCTION.md` → 3.3 Shell 命令执行流 |
 | Shell 数据结构（后续 Phase 用） | `INSTRUCTION.md` → 2.3 Shell 管理 |
 
 ### 任务
 
-1. **创建 `src/executor/shell_exec.rs`**
-   - `exec_captured(cmd, args, shell_type)`: 通过 `script -e -q -c` 在 PTY 中执行，使用 `Stdio::inherit()` 传真实终端 stdin 以确保 PTY 尺寸正确
+1. ✅ **创建 `src/executor/shell_exec.rs`**
+   - `exec_captured(cmd, args, shell_type, timeout)`: 通过 `script -e -q -c` 在 PTY 中捕获执行
+   - `exec_shell_direct(cmd, args, shell_type)`: Stdio::inherit 直连终端执行
+   - `exec_bash(bash_args, timeout)`: Bash 命令专用执行（避免双层 shell 嵌套）
    - `exec_cd(args)`: 拦截 cd 命令，通过 `std::env::set_current_dir()` 切换目录
    - `shell_quote(s)`: 单引号转义辅助函数
+   - `wait_child_with_timeout(child, label, secs)`: 超时等待 + SIGTERM/SIGKILL 终止
    - `CapturedOutput` 结构体：stdout、stderr、exit_code
 
-2. **更新 `src/executor/mod.rs`**
-   - `dispatch()`: Shell 命令统一走 `exec_captured`；`cd` 命令走 `exec_cd`
-   - `ExecContext` 不再持有 PTY 引用
+2. ✅ **更新 `src/executor/mod.rs`**
+   - `dispatch()`: Captured 模式分派（管道 / 异步 / Bash）
+   - `dispatch_direct()`: 直连模式分派（Shell / Interactive 直接执行，cd 拦截）
+   - `check_safety()`: 安全模式匹配（pub(crate) 供 REPL 层调用）
+   - `ExecContext` 包含 shell_type、pre_out、timeout_secs、deny_patterns
 
-3. **更新 `src/repl/mod.rs`**
-   - REPL 循环不再传递 `PtySession`
-   - 提示符使用 `prompt::colorize()` 按配置着色
+3. ✅ **更新 `src/repl/mod.rs`**
+   - `should_use_direct()`: 判定当前命令应使用直连还是 Captured 模式
+   - 直连路径：安全检查 → `print_shell_prefix()` → `dispatch_direct()`
+   - Captured 路径：逐段 `dispatch()` → `print_captured_output()`（带 shell/Bash 前缀）
+   - `show_opening()`: 启动时显示 opening.exec 或 opening.file
+   - Editor 复用：`DefaultEditor` 由 REPL 持有，全程复用
 
-4. **创建 `src/repl/prompt.rs`**
-   - `generate_prompt()`: 生成路径提示符
+4. ✅ **创建 `src/repl/prompt.rs`**
+   - `generate_prompt()`: 生成路径提示符（支持 `~` 缩写、`{path}` 格式模板）
    - `colorize()`: ANSI 前景色包装
-   - `ansi_code()`: 颜色名到 ANSI 码映射
+   - `ansi_code()`: 颜色名到 ANSI 码映射（16 种颜色）
 
-5. **创建 `src/shell/pty.rs`（保留供后续 Phase）**
-   - PTY 创建与 send_command 实现，当前主路径不调用
+5. ✅ **创建 `src/shell/pty.rs`（保留供后续 Phase）**
+   - `spawn_pty_session()`、`send_command()` 完整实现
+   - 拆分为 `create_pty_io_pair`、`init_shell_session`、`wait_for_shell_ready` 子函数
+   - unsafe 代码已添加合理性注释
 
-6. **更新 `src/app/init.rs`**
-   - `detect_shell_type()`: 检测 `nu` 或 `bash` 可用性
+6. ✅ **更新 `src/app/init.rs`**
+   - `detect_shell_type()`: 检测 `nu` / `bash` 可用性
 
 ### 验证
-- 启动程序，提示符绿色显示当前路径
-- 输入 `ls -la` → 正常显示目录内容（含颜色）
-- 输入 `eza` → 正常显示（script 提供 TTY）
-- 输入 `nu -c 'ls'` 或 nu 环境下 `ls` → nushell 表格正常渲染（PTY 尺寸正确）
-- 输入 `cd /tmp` → 提示符路径更新为 `/tmp`
-- 输入 `pwd` → 显示 `/tmp`
-- `echo "hello"` → 输出 hello
-- 非零退出码命令（如 `ls /nonexistent`）→ 显示错误但不崩溃，退出码正确传递
+- [x] 启动程序，提示符绿色显示当前路径
+- [x] 输入 `ls -la` → 正常显示目录内容（含颜色）
+- [x] 输入 `eza` → 正常显示（script 提供 TTY）
+- [x] 输入 `nu -c 'ls'` 或 nu 环境下 `ls` → nushell 表格正常渲染
+- [x] 输入 `cd /tmp` → 提示符路径更新为 `/tmp`
+- [x] 输入 `pwd` → 显示 `/tmp`
+- [x] `echo "hello"` → 输出 hello
+- [x] 非零退出码命令 → 显示错误但不崩溃，退出码正确传递
+- [x] `python3 -c "print(input('? '))"` → 直连模式下交互输入正常
+- [x] `python3 test_interact.py` → 流式输出逐帧显示 + 交互输入
+- [x] `ls | grep Cargo` → Captured 模式管道正确
+- [x] `!!@Bash: ls -la` → Bash: 标识 + 亮黄色前缀
+- [x] `rm -rf /` → 安全拦截错误
+- [x] 173 个单元测试全部通过
+
+---
+
+### Phase 4 复盘要点（Phase 5 开始前必须注意）
+
+1. **双模式架构**：REPL 循环通过 `should_use_direct()` 判断走直连还是 Captured。直连模式解决实时交互问题，Captured 模式解决管道传递问题。后续添加异步 Shell（Phase 6）时，异步 Shell 内部也适用同样的双模式逻辑。
+
+2. **Bash 命令专用路径**：`exec_bash()` 是专门为 `!!@Bash:` 设计的，直接构造 `bash -c '{args}'` 而不经过 `exec_captured` 的 `{shell} -c` 包装。Phase 6 完善 Bash 命令时，注意此函数已可用。
+
+3. **安全检查已就位**：`check_safety()` 为 `pub(crate)`，REPL 层在直连模式下直接调用，`dispatch()` 在 Captured 模式内调用。后续添加新命令类型时，确保安全检查不被绕过。
+
+4. **`!cmd` 的降级**：由于直连模式下普通 shell 命令也能接管终端（TUI/vim 等），`!cmd` 语法的必要性已大幅降低。Phase 7 的交互命令 still 可以保留 `!cmd` 作为语法糖（alias 展开、安全区分），但不是必须的。
+
+5. **`shell_type_fg` 默认值**：已从 `"cyan"` 改为 `"blue"`，与 `nashell_dev.md` 配置示例一致。
+
+6. **持久 PTY 代码保留**：`src/shell/pty.rs` 的持久 PTY 实现（`spawn_pty_session`、`send_command`）完整保留，仅在测试中调用。Phase 6 异步 Shell 可能复用它（但目前打算用一次性 bash 子进程）。
+
+7. **文件组织**：`executor/` 下 `shell_exec.rs` 集中了所有 shell 执行函数（captured/direct/bash/cd/timeout），符合 INSTRUCTION.md 1.1 规范。
 
 ---
 

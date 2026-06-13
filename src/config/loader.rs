@@ -11,6 +11,150 @@ fn preprocess_bare_bools(content: &str) -> String {
         .replace("=false", "=#false")
 }
 
+/// 将 KdlValue 转为 String。
+fn value_to_string(val: &kdl::KdlValue) -> String {
+    match val {
+        kdl::KdlValue::String(s) => s.clone(),
+        kdl::KdlValue::Integer(i) => i.to_string(),
+        kdl::KdlValue::Float(f) => f.to_string(),
+        kdl::KdlValue::Bool(b) => b.to_string(),
+        kdl::KdlValue::Null => String::new(),
+    }
+}
+
+/// 从节点的子节点中获取具名字节点的字符串值。
+fn get_child_string(node: &kdl::KdlNode, child_name: &str) -> Option<String> {
+    node.children()
+        .and_then(|doc| {
+            doc.nodes()
+                .iter()
+                .find(|n| n.name().value() == child_name)
+        })
+        .and_then(|n| n.entries().first().map(|e| e.value()))
+        .and_then(|v| v.as_string())
+        .map(|s| s.to_string())
+}
+
+/// 从节点的子节点中获取具名字节点的整数值。
+fn get_child_integer(node: &kdl::KdlNode, child_name: &str) -> Option<i128> {
+    node.children()
+        .and_then(|doc| doc.nodes().iter().find(|n| n.name().value() == child_name))
+        .and_then(|n| n.entries().first().map(|e| e.value()))
+        .and_then(|v| v.as_integer())
+}
+
+/// 从节点的属性（键=值 entry）获取字符串值。
+fn get_prop_string(node: &kdl::KdlNode, prop_name: &str) -> Option<String> {
+    node.get(prop_name)
+        .and_then(|v| v.as_string())
+        .map(|s| s.to_string())
+}
+
+/// 从节点的属性（键=值 entry）获取布尔值。
+fn get_prop_bool(node: &kdl::KdlNode, prop_name: &str) -> Option<bool> {
+    node.get(prop_name).and_then(|v| v.as_bool())
+}
+
+/// 解析 opening 块到配置。
+fn parse_opening_block(node: &kdl::KdlNode, config: &mut NashellConfig) {
+    config.opening.exec = get_child_string(node, "exec");
+    config.opening.file = get_child_string(node, "file");
+}
+
+/// 解析 prompts 块到配置。
+fn parse_prompts_block(node: &kdl::KdlNode, config: &mut NashellConfig) {
+    if let Some(v) = get_child_string(node, "input_prompt_fg") {
+        config.prompts.input_prompt_fg = v;
+    }
+    if let Some(v) = get_child_string(node, "input_prompt_format") {
+        config.prompts.input_prompt_format = v;
+    }
+    if let Some(v) = get_child_string(node, "input_continue_format") {
+        config.prompts.input_continue_format = v;
+    }
+    if let Some(v) = get_child_string(node, "output_prompt_format") {
+        config.prompts.output_prompt_format = v;
+    }
+    if let Some(v) = get_child_string(node, "output_prompt_fg") {
+        config.prompts.output_prompt_fg = v;
+    }
+    if let Some(v) = get_child_string(node, "bash_output_prompt_fg") {
+        config.prompts.bash_output_prompt_fg = v;
+    }
+    if let Some(v) = get_child_string(node, "shell_type_fg") {
+        config.prompts.shell_type_fg = v;
+    }
+}
+
+/// 解析 NaCommands 块到配置。
+fn parse_nacommands_block(node: &kdl::KdlNode, config: &mut NashellConfig) {
+    if let Some(children) = node.children() {
+        for cmd_node in children.nodes() {
+            let cmd_name = cmd_node.name().value().to_string();
+            let exec = get_prop_string(cmd_node, "exec").unwrap_or_default();
+            let long_argument =
+                get_prop_bool(cmd_node, "long_argument").unwrap_or(false);
+            let exec_script = get_prop_string(cmd_node, "exec_script");
+
+            config.na_commands.insert(
+                cmd_name,
+                ExternalCmdConfig {
+                    exec,
+                    long_argument,
+                    exec_script,
+                },
+            );
+        }
+    }
+}
+
+/// 解析 alias 块到配置。
+fn parse_alias_block(node: &kdl::KdlNode, config: &mut NashellConfig) {
+    if let Some(children) = node.children() {
+        for alias_node in children.nodes() {
+            let alias_name = alias_node.name().value().to_string();
+            if let Some(val) = alias_node.entries().first() {
+                config
+                    .aliases
+                    .insert(alias_name, value_to_string(val.value()));
+            }
+        }
+    }
+}
+
+/// 解析 shell 块到配置。
+fn parse_shell_block(node: &kdl::KdlNode, config: &mut NashellConfig) {
+    if let Some(timeout) = get_child_integer(node, "timeout_secs") {
+        config.shell.timeout_secs = timeout as u64;
+    }
+}
+
+/// 解析 safety 块到配置。
+fn parse_safety_block(node: &kdl::KdlNode, config: &mut NashellConfig) {
+    if let Some(children) = node.children() {
+        for child_node in children.nodes() {
+            if child_node.name().value() == "deny_patterns" {
+                for entry in child_node.entries() {
+                    config
+                        .safety
+                        .deny_patterns
+                        .push(value_to_string(entry.value()));
+                }
+            }
+        }
+    }
+}
+
+/// 解析 plugins 块到配置。
+fn parse_plugins_block(node: &kdl::KdlNode, config: &mut NashellConfig) {
+    if let Some(dir) = get_child_string(node, "dir") {
+        config.plugins.dir = dir;
+    }
+    if let Some(depth) = get_child_integer(node, "max_recursion_depth") {
+        config.plugins.max_recursion_depth = depth as u32;
+    }
+}
+
 /// 解析 KDL 格式的配置字符串。
 ///
 /// 若输入为空字符串，返回默认配置。
@@ -35,142 +179,17 @@ pub fn parse_kdl(content: &str) -> Result<NashellConfig, NashellError> {
 
     let mut config = NashellConfig::default();
 
-    // Helper functions defined inside parse_kdl for convenience
-
-    /// 将 KdlValue 转为 String
-    fn value_to_string(val: &kdl::KdlValue) -> String {
-        match val {
-            kdl::KdlValue::String(s) => s.clone(),
-            kdl::KdlValue::Integer(i) => i.to_string(),
-            kdl::KdlValue::Float(f) => f.to_string(),
-            kdl::KdlValue::Bool(b) => b.to_string(),
-            kdl::KdlValue::Null => String::new(),
-        }
-    }
-
-    /// 从节点的子节点中获取具名字节点的字符串值
-    fn get_child_string(node: &kdl::KdlNode, child_name: &str) -> Option<String> {
-        node.children()
-            .and_then(|doc| {
-                doc.nodes()
-                    .iter()
-                    .find(|n| n.name().value() == child_name)
-            })
-            .and_then(|n| n.entries().first().map(|e| e.value()))
-            .and_then(|v| v.as_string())
-            .map(|s| s.to_string())
-    }
-
-    /// 从节点的子节点中获取具名字节点的整数值
-    fn get_child_integer(node: &kdl::KdlNode, child_name: &str) -> Option<i128> {
-        node.children()
-            .and_then(|doc| doc.nodes().iter().find(|n| n.name().value() == child_name))
-            .and_then(|n| n.entries().first().map(|e| e.value()))
-            .and_then(|v| v.as_integer())
-    }
-
-    /// 从节点的属性（键=值 entry）获取字符串值
-    fn get_prop_string(node: &kdl::KdlNode, prop_name: &str) -> Option<String> {
-        node.get(prop_name)
-            .and_then(|v| v.as_string())
-            .map(|s| s.to_string())
-    }
-
-    /// 从节点的属性（键=值 entry）获取布尔值
-    fn get_prop_bool(node: &kdl::KdlNode, prop_name: &str) -> Option<bool> {
-        node.get(prop_name).and_then(|v| v.as_bool())
-    }
-
     for node in document.nodes() {
         let name = node.name().value().to_lowercase();
 
         match name.as_str() {
-            "opening" => {
-                config.opening.exec = get_child_string(node, "exec");
-                config.opening.file = get_child_string(node, "file");
-            }
-            "prompts" => {
-                if let Some(v) = get_child_string(node, "input_prompt_fg") {
-                    config.prompts.input_prompt_fg = v;
-                }
-                if let Some(v) = get_child_string(node, "input_prompt_format") {
-                    config.prompts.input_prompt_format = v;
-                }
-                if let Some(v) = get_child_string(node, "input_continue_format") {
-                    config.prompts.input_continue_format = v;
-                }
-                if let Some(v) = get_child_string(node, "output_prompt_format") {
-                    config.prompts.output_prompt_format = v;
-                }
-                if let Some(v) = get_child_string(node, "output_prompt_fg") {
-                    config.prompts.output_prompt_fg = v;
-                }
-                if let Some(v) = get_child_string(node, "bash_output_prompt_fg") {
-                    config.prompts.bash_output_prompt_fg = v;
-                }
-                if let Some(v) = get_child_string(node, "shell_type_fg") {
-                    config.prompts.shell_type_fg = v;
-                }
-            }
-            "nacommands" => {
-                if let Some(children) = node.children() {
-                    for cmd_node in children.nodes() {
-                        let cmd_name = cmd_node.name().value().to_string();
-                        let exec = get_prop_string(cmd_node, "exec").unwrap_or_default();
-                        let long_argument =
-                            get_prop_bool(cmd_node, "long_argument").unwrap_or(false);
-                        let exec_script = get_prop_string(cmd_node, "exec_script");
-
-                        config.na_commands.insert(
-                            cmd_name,
-                            ExternalCmdConfig {
-                                exec,
-                                long_argument,
-                                exec_script,
-                            },
-                        );
-                    }
-                }
-            }
-            "alias" => {
-                if let Some(children) = node.children() {
-                    for alias_node in children.nodes() {
-                        let alias_name = alias_node.name().value().to_string();
-                        if let Some(val) = alias_node.entries().first() {
-                            config
-                                .aliases
-                                .insert(alias_name, value_to_string(val.value()));
-                        }
-                    }
-                }
-            }
-            "shell" => {
-                if let Some(timeout) = get_child_integer(node, "timeout_secs") {
-                    config.shell.timeout_secs = timeout as u64;
-                }
-            }
-            "safety" => {
-                if let Some(children) = node.children() {
-                    for child_node in children.nodes() {
-                        if child_node.name().value() == "deny_patterns" {
-                            for entry in child_node.entries() {
-                                config
-                                    .safety
-                                    .deny_patterns
-                                    .push(value_to_string(entry.value()));
-                            }
-                        }
-                    }
-                }
-            }
-            "plugins" => {
-                if let Some(dir) = get_child_string(node, "dir") {
-                    config.plugins.dir = dir;
-                }
-                if let Some(depth) = get_child_integer(node, "max_recursion_depth") {
-                    config.plugins.max_recursion_depth = depth as u32;
-                }
-            }
+            "opening" => parse_opening_block(node, &mut config),
+            "prompts" => parse_prompts_block(node, &mut config),
+            "nacommands" => parse_nacommands_block(node, &mut config),
+            "alias" => parse_alias_block(node, &mut config),
+            "shell" => parse_shell_block(node, &mut config),
+            "safety" => parse_safety_block(node, &mut config),
+            "plugins" => parse_plugins_block(node, &mut config),
             _ => {}
         }
     }

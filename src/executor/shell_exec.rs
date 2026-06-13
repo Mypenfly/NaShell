@@ -1,4 +1,7 @@
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
 use crate::error::NashellError;
 
@@ -20,33 +23,93 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// 通过 `script -q -c` 在 PTY 中执行 shell 命令并捕获输出。
+/// 从 `std::process::Output` 构建 `CapturedOutput`。
+fn build_captured_output(output: std::process::Output) -> Result<CapturedOutput, NashellError> {
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let exit_code = output.status.code().unwrap_or(-1);
+
+    Ok(CapturedOutput {
+        stdout,
+        stderr,
+        exit_code,
+    })
+}
+
+/// 等待子进程输出，支持超时机制。
 ///
-/// `script` 分配伪终端。传入真实 stdin 使 `script` 能查询终端尺寸
-///（解决默认 0×0 导致 nushell 表格渲染失败的问题）。
-/// 命令结束后 `script` 自动退出，无持久会话、无哨兵、无状态机。
+/// 若 `timeout_secs == 0`，直接阻塞等待。
+/// 若超时，通过 `libc::kill` 终止子进程并返回 `Timeout` 错误。
 ///
-/// 执行链路：
-///   Rust Command → script -e -q -c "{shell} -c '{command}'" /dev/null
-///
-/// # 参数
-/// - `cmd`: 命令名
-/// - `args`: 命令参数
-/// - `shell_type`: shell 类型（"bash" 或 "nu"）
-pub fn exec_captured(
-    cmd: &str,
-    args: &[String],
-    shell_type: &str,
+/// # Safety
+/// `libc::kill` 对已知有效的子进程 PID 发送 SIGTERM/SIGKILL 是安全的，
+/// 这是唯一能在 `wait_with_output` 消费 `Child` 所有权后仍能终止进程的方式。
+fn wait_child_with_timeout(
+    child: std::process::Child,
+    command_label: &str,
+    timeout_secs: u64,
 ) -> Result<CapturedOutput, NashellError> {
-    let mut full_cmd = cmd.to_string();
-    for arg in args {
-        full_cmd.push(' ');
-        full_cmd.push_str(arg);
+    if timeout_secs == 0 {
+        let output = child.wait_with_output().map_err(|e| NashellError::Io {
+            path: Some("script".to_string()),
+            source: e,
+        })?;
+        return build_captured_output(output);
     }
 
-    let inner_cmd = format!("{} -c {}", shell_type, shell_quote(&full_cmd));
+    let child_pid = child.id();
 
-    let output = Command::new("script")
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let result = child.wait_with_output();
+        let _ = tx.send(result);
+    });
+
+    match rx.recv_timeout(Duration::from_secs(timeout_secs)) {
+        Ok(Ok(output)) => build_captured_output(output),
+        Ok(Err(e)) => Err(NashellError::Io {
+            path: Some("script".to_string()),
+            source: e,
+        }),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            let pid = child_pid as i32;
+            unsafe {
+                libc::kill(pid, libc::SIGTERM);
+            }
+            thread::sleep(Duration::from_millis(500));
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+            log::warn!("命令超时 ({}s): {}", timeout_secs, command_label);
+            Err(NashellError::Timeout {
+                command: command_label.to_string(),
+                seconds: timeout_secs,
+            })
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(NashellError::Execute {
+            command: command_label.to_string(),
+            exit_code: None,
+            stderr: "子进程意外终止".to_string(),
+        }),
+    }
+}
+
+/// 执行 Bash 命令（`!!@Bash:`）。
+///
+/// 直接通过 `script -e -q -c "bash -c '{args}'" /dev/null` 执行，
+/// 不做额外的 shell 类型包装。这是避免与 `exec_captured` 的
+/// `{shell} -c '{cmd}'` 包装产生双层嵌套的关键。
+///
+/// # 参数
+/// - `bash_args`: 传给 `bash -c` 的参数字符串
+/// - `timeout_secs`: 超时秒数
+pub fn exec_bash(
+    bash_args: &str,
+    timeout_secs: u64,
+) -> Result<CapturedOutput, NashellError> {
+    let inner_cmd = format!("bash -c {}", shell_quote(bash_args));
+
+    let child = Command::new("script")
         .stdin(Stdio::inherit())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -60,22 +123,58 @@ pub fn exec_captured(
         .map_err(|e| NashellError::Io {
             path: Some("script".to_string()),
             source: e,
-        })?
-        .wait_with_output()
+        })?;
+
+    wait_child_with_timeout(child, bash_args, timeout_secs)
+}
+
+/// 通过 `script -q -c` 在 PTY 中执行 shell 命令并捕获输出。
+///
+/// `script` 分配伪终端。传入真实 stdin 使 `script` 能查询终端尺寸
+///（解决默认 0×0 导致 nushell 表格渲染失败的问题）。
+/// 命令结束后 `script` 自动退出，无持久会话、无哨兵、无状态机。
+///
+/// 如果命令超过 `timeout_secs` 秒未完成，强制终止并返回超时错误。
+///
+/// 执行链路：
+///   Rust Command → script -e -q -c "{shell} -c '{command}'" /dev/null
+///
+/// # 参数
+/// - `cmd`: 命令名
+/// - `args`: 命令参数
+/// - `shell_type`: shell 类型（"bash" 或 "nu"）
+/// - `timeout_secs`: 超时秒数（0 表示无超时）
+pub fn exec_captured(
+    cmd: &str,
+    args: &[String],
+    shell_type: &str,
+    timeout_secs: u64,
+) -> Result<CapturedOutput, NashellError> {
+    let mut full_cmd = cmd.to_string();
+    for arg in args {
+        full_cmd.push(' ');
+        full_cmd.push_str(arg);
+    }
+
+    let inner_cmd = format!("{} -c {}", shell_type, shell_quote(&full_cmd));
+
+    let child = Command::new("script")
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .arg("-e")
+        .arg("-q")
+        .arg("-c")
+        .arg(&inner_cmd)
+        .arg("/dev/null")
+        .env("TERM", "xterm-256color")
+        .spawn()
         .map_err(|e| NashellError::Io {
             path: Some("script".to_string()),
             source: e,
         })?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let exit_code = output.status.code().unwrap_or(-1);
-
-    Ok(CapturedOutput {
-        stdout,
-        stderr,
-        exit_code,
-    })
+    wait_child_with_timeout(child, &full_cmd, timeout_secs)
 }
 
 /// 执行 `cd` 目录切换。
@@ -113,6 +212,55 @@ pub fn exec_cd(args: &[String]) -> Result<(), NashellError> {
     })
 }
 
+/// 直连终端执行 shell 命令（不捕获输出）。
+///
+/// stdin/stdout/stderr 全部继承自父进程，子进程直接读写真实终端。
+/// 适用于无管道、无异步、非 Bash 快捷方式的单一命令——
+/// 支持实时进度输出和交互式输入（如 `python` REPL、`read` 等）。
+///
+/// 执行链路：
+///   Rust Command → {shell} -c '{command}'  (全部 stdio 继承)
+///
+/// `cd` 命令不经过此函数，由 Rust 进程直接拦截处理。
+///
+/// # 参数
+/// - `cmd`: 命令名
+/// - `args`: 命令参数
+/// - `shell_type`: shell 类型（"bash" 或 "nu"）
+///
+/// # 返回
+/// 命令的退出码，-1 表示被信号终止。
+pub fn exec_shell_direct(
+    cmd: &str,
+    args: &[String],
+    shell_type: &str,
+) -> Result<i32, NashellError> {
+    let mut full_cmd = cmd.to_string();
+    for arg in args {
+        full_cmd.push(' ');
+        full_cmd.push_str(arg);
+    }
+
+    let status = Command::new(shell_type)
+        .arg("-c")
+        .arg(&full_cmd)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(|e| NashellError::Io {
+            path: Some(cmd.to_string()),
+            source: e,
+        })?
+        .wait()
+        .map_err(|e| NashellError::Io {
+            path: Some(cmd.to_string()),
+            source: e,
+        })?;
+
+    Ok(status.code().unwrap_or(-1))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,7 +277,7 @@ mod tests {
 
     #[test]
     fn test_exec_captured_basic() {
-        let result = exec_captured("echo", &["hello".to_string()], "bash");
+        let result = exec_captured("echo", &["hello".to_string()], "bash", 120);
         assert!(result.is_ok());
         let output = result.unwrap();
         assert!(output.stdout.contains("hello"));
@@ -139,7 +287,7 @@ mod tests {
     #[test]
     fn test_exec_captured_error() {
         let result =
-            exec_captured("ls", &["/nonexistent_path_xyz".to_string()], "bash");
+            exec_captured("ls", &["/nonexistent_path_xyz".to_string()], "bash", 120);
         assert!(result.is_ok());
         let output = result.unwrap();
         assert_ne!(output.exit_code, 0);
@@ -147,11 +295,24 @@ mod tests {
 
     #[test]
     fn test_exec_captured_nonexistent_command() {
-        let result = exec_captured("nonexistent_command_xyz", &[], "bash");
+        let result = exec_captured("nonexistent_command_xyz", &[], "bash", 120);
         assert!(result.is_ok());
         let output = result.unwrap();
         assert_ne!(output.exit_code, 0);
         assert!(!output.stderr.is_empty() || output.exit_code == 127);
+    }
+
+    #[test]
+    fn test_exec_bash_basic() {
+        let result = exec_bash("echo hello_from_bash", 120);
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert!(
+            output.stdout.contains("hello_from_bash"),
+            "expected 'hello_from_bash' in stdout, got: '{}'",
+            output.stdout
+        );
+        assert_eq!(output.exit_code, 0);
     }
 
     #[test]

@@ -56,7 +56,7 @@ impl Default for PromptsConfig {
             output_prompt_format: "@System #>>".to_string(),
             output_prompt_fg: "grey".to_string(),
             bash_output_prompt_fg: "bright_yellow".to_string(),
-            shell_type_fg: "cyan".to_string(),
+            shell_type_fg: "blue".to_string(),
         }
     }
 }
@@ -135,7 +135,7 @@ mod tests {
         assert_eq!(prompts.input_continue_format, ">> ");
         assert_eq!(prompts.output_prompt_fg, "grey");
         assert_eq!(prompts.bash_output_prompt_fg, "bright_yellow");
-        assert_eq!(prompts.shell_type_fg, "cyan");
+        assert_eq!(prompts.shell_type_fg, "blue");
     }
 
     #[test]

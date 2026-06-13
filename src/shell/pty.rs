@@ -8,7 +8,7 @@ use std::io::{Read, Write};
 use std::os::unix::io::FromRawFd;
 use std::time::Duration;
 
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+use portable_pty::{native_pty_system, CommandBuilder, PtyPair, PtySize};
 
 use crate::constants;
 use crate::error::NashellError;
@@ -47,6 +47,11 @@ impl fmt::Debug for PtySession {
 }
 
 /// 对 fd 设置 O_NONBLOCK 标志。
+///
+/// # Safety 合理性
+/// 必须通过 `libc::fcntl` 设置 `O_NONBLOCK`，因为 `portable-pty` 打开的
+/// PTY master fd 默认会继承阻塞模式。Rust 标准库的 `File` 没有直接设置
+/// 非阻塞模式的方法。`libc::fcntl` 是 POSIX 标准调用，在此上下文中安全。
 fn set_nonblocking(fd: std::os::unix::io::RawFd) -> Result<(), NashellError> {
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL, 0) };
     if flags == -1 {
@@ -69,11 +74,14 @@ fn set_nonblocking(fd: std::os::unix::io::RawFd) -> Result<(), NashellError> {
 ///
 /// 初始化流程：
 /// 1. 创建 PTY，启动 shell
-/// 2. 注入 `stty -echo` 抑制命令回显
-/// 3. 注入 `PROMPT_COMMAND` 使 shell 在每次显示提示符前发出 OSC 完成标记
-/// 4. 清空 PS1 避免提示符文本干扰输出
-/// 5. 发送探测命令，等待就绪确认
-/// 6. 排空初始化过程中产生的剩余输出
+/// 2. 注入初始化命令（stty、PS1、PROMPT_COMMAND）
+/// 3. 等待就绪确认信号
+///
+/// # Safety 合理性
+/// 使用 `libc::dup` 复制 PTY master fd，因为需要独立的 reader/writer。
+/// `portable-pty` 的 master 端共享同一个 fd，直接对读/写操作会有竞争。
+/// `dup` 是 POSIX 标准操作，创建的 fd 生命周期由 `File::from_raw_fd`
+/// 管理，不会泄漏。`from_raw_fd` 在此处安全因为 dup 出来的 fd 是有效的。
 pub fn spawn_pty_session(shell_type: &str) -> Result<PtySession, NashellError> {
     let pty_system = native_pty_system();
 
@@ -106,27 +114,48 @@ pub fn spawn_pty_session(shell_type: &str) -> Result<PtySession, NashellError> {
             stderr: "无法获取子进程 PID".to_string(),
         })?;
 
-    // 获取 master 端 raw fd，复制一份作为 reader 并显式设置为非阻塞
-    let master_fd = pair.master.as_raw_fd();
-    let reader_fd = {
-        let fd = master_fd.ok_or_else(|| NashellError::Execute {
-            command: shell_type.to_string(),
-            exit_code: None,
-            stderr: "无法获取 PTY master fd".to_string(),
-        })?;
-        let dup_fd = unsafe { libc::dup(fd) };
-        if dup_fd == -1 {
-            return Err(NashellError::Io {
-                path: Some("dup".to_string()),
-                source: std::io::Error::last_os_error(),
-            });
-        }
-        dup_fd
-    };
-    set_nonblocking(reader_fd)?;
-    let mut reader = unsafe { File::from_raw_fd(reader_fd) };
+    let (mut reader, mut writer) = create_pty_io_pair(&pair, shell_type)?;
 
-    let mut writer = pair
+    init_shell_session(&mut writer)?;
+
+    wait_for_shell_ready(&mut reader)?;
+
+    Ok(PtySession {
+        child_pid,
+        reader,
+        writer,
+    })
+}
+
+/// 从 PTY pair 创建独立的 reader/writer 端点。
+///
+/// 复制 master fd 以避免读写竞争，reader 设置为非阻塞模式。
+///
+/// # Safety 合理性
+/// `libc::dup` 复制 fd 以确保 reader 和 writer 使用独立的文件描述符。
+/// 共享同一个 fd 会导致读写操作相互干扰。`dup` 是 POSIX 标准操作，
+/// 新 fd 的生命周期由返回的 `File` 管理，不会泄漏资源。
+fn create_pty_io_pair(
+    pair: &PtyPair,
+    shell_type: &str,
+) -> Result<(File, Box<dyn Write + Send>), NashellError> {
+    let master_fd = pair.master.as_raw_fd();
+    let fd = master_fd.ok_or_else(|| NashellError::Execute {
+        command: shell_type.to_string(),
+        exit_code: None,
+        stderr: "无法获取 PTY master fd".to_string(),
+    })?;
+    let dup_fd = unsafe { libc::dup(fd) };
+    if dup_fd == -1 {
+        return Err(NashellError::Io {
+            path: Some("dup".to_string()),
+            source: std::io::Error::last_os_error(),
+        });
+    }
+    set_nonblocking(dup_fd)?;
+    let reader = unsafe { File::from_raw_fd(dup_fd) };
+
+    let writer = pair
         .master
         .take_writer()
         .map_err(|e| NashellError::Io {
@@ -134,11 +163,17 @@ pub fn spawn_pty_session(shell_type: &str) -> Result<PtySession, NashellError> {
             source: std::io::Error::other(format!("{:#}", e)),
         })?;
 
-    // 注入初始化命令：
-    //   stty -echo             — 抑制命令回显
-    //   export PS1=''          — 清空提示符
-    //   export PROMPT_COMMAND  — 注入 OSC 777 完成标记
-    //   echo __NASHELL_READY__ — 就绪探测
+    Ok((reader, writer))
+}
+
+/// 向新启动的 shell 注入初始化命令。
+///
+/// 注入内容：
+/// - `stty -echo` — 抑制命令回显
+/// - `export PS1=''` — 清空提示符避免文本干扰
+/// - `export PROMPT_COMMAND` — 注入 OSC 777 完成标记
+/// - `echo __NASHELL_READY__` — 就绪探测
+fn init_shell_session(writer: &mut (impl Write + ?Sized)) -> Result<(), NashellError> {
     let init_cmds = format!(
         "stty -echo\n\
          export PS1=''\n\
@@ -154,11 +189,14 @@ pub fn spawn_pty_session(shell_type: &str) -> Result<PtySession, NashellError> {
     writer.flush().map_err(|e| NashellError::Io {
         path: None,
         source: e,
-    })?;
+    })
+}
 
-    // 阶段 1：等待就绪探测响应，并继续排空 PROMPT_COMMAND 标记。
-    // 找到 READY_MARKER 后不立即退出，而是继续读到 DONE_MARKER，
-    // 确保所有初始化输出（含 PROMPT_COMMAND 发出的标记）在返回前被消费。
+/// 等待 shell 初始化完成信号。
+///
+/// 轮询 PTY 输出直到同时检测到就绪标记和 PROMPT_COMMAND 完成标记，
+/// 确保所有初始化输出在返回前被消费。
+fn wait_for_shell_ready(reader: &mut File) -> Result<(), NashellError> {
     let deadline = std::time::Instant::now() + Duration::from_secs(INIT_TIMEOUT_SECS);
     let mut found_ready = false;
     let mut found_done = false;
@@ -191,8 +229,8 @@ pub fn spawn_pty_session(shell_type: &str) -> Result<PtySession, NashellError> {
         }
     }
 
-    // 阶段 2：最终排空残留数据
-    drain_reader(&mut reader);
+    // 排空残留数据
+    drain_reader(reader);
 
     if !found_ready {
         log::warn!(
@@ -203,11 +241,7 @@ pub fn spawn_pty_session(shell_type: &str) -> Result<PtySession, NashellError> {
         log::debug!("PTY 初始化完成，shell 已就绪");
     }
 
-    Ok(PtySession {
-        child_pid,
-        reader,
-        writer,
-    })
+    Ok(())
 }
 
 /// 向 PTY 发送命令，等待执行完毕并返回输出。

@@ -59,7 +59,7 @@ fn main() {
     let home_dir = dirs::home_dir();
 
     // 进入 REPL 循环
-    repl::run(home_dir, &config.prompts, &shell_type);
+    repl::run(home_dir, &config, &shell_type);
 
     log::info!("NaShell exiting.");
 }

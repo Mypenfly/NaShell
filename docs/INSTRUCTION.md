@@ -447,25 +447,29 @@ pub struct PluginsConfig {
            │ RawCommands
            ▼
 ┌──────────────────────┐
-│  执行分派 (Dispatcher) │  src/executor/mod.rs
-│  遍历 RawCmd 逐条执行   │
-└──────────┬───────────┘
-           │ 分类型路由
-    ┌──────┼──────┐
-    ▼      ▼      ▼
-  Shell  NaCmd  Interact
-    │      │      │
-    ▼      ▼      ▼
+│  模式判定              │  src/repl/mod.rs
+│  should_use_direct()  │
+└──────┬───────┬───────┘
+       │       │
+  直连模式   Captured 模式
+       │       │
+       ▼       ▼
+┌──────────┐ ┌──────────────────┐
+│dispatch  │ │ dispatch()       │
+│_direct() │ │ 遍历 RawCmd 逐段  │
+│          │ │ 管道前段输出→后段  │
+│{shell}   │ │                  │
+│ -c exec  │ │ script -e -q -c  │
+│(stdio   │ │ 捕获 stdout/err   │
+│ inherit) │ │                  │
+└────┬─────┘ └────────┬─────────┘
+     │                │
+     ▼                ▼
 ┌──────────────────────┐
-│  管道编排              │  src/executor/pipeline_orch.rs
-│  前段输出 → 后段输入    │
+│  输出打印              │  src/repl/mod.rs
+│  带提示符/ANSI 码      │  print_shell_prefix()
+│                      │  print_captured_output()
 └──────────┬───────────┘
-           │ 最终输出
-           ▼
-┌──────────────────────┐
-│  输出打印              │  src/repl/prompt.rs
-│  带提示符/ANSI 码      │
-└──────────────────────┘
            │
            ▼
       下一个 REPL 循环
@@ -484,22 +488,59 @@ pub struct PluginsConfig {
 
 ### 3.3 Shell 命令执行流
 
-Shell 命令通过 `script -e -q -c "{shell} -c '{command}'" /dev/null` 在一次性 PTY 中执行。
-`script` 分配伪终端，命令感知到 TTY 后正常输出（解决 eza、ls --color=auto 等工具的 TTY 检测问题）。
+NaShell 采用**双模式执行架构**，根据命令特征自动选择执行方式：
 
-关键实现细节：
-- 使用 `Command::spawn()` + `Stdio::inherit()` 将真实终端 stdin 传给 `script`，
-  确保 `script` 能从 stdin 获取终端尺寸并正确设置 PTY 大小（否则 nushell 表格报 0 columns）
-- `script -e` 使退出码正确传递（`script` 默认总是返回 0）
-- `cd` 命令由 Rust 进程通过 `std::env::set_current_dir()` 直接拦截处理
+#### 直连模式（`exec_shell_direct`）
 
-命令结束后 `script` 自动退出，无需哨兵或状态机。
+条件：单一命令 ∧ 无管道 `|` ∧ 无 `@/Async` ∧ 非 `!!@Bash:`
 
-持久 PTY 会话（`src/shell/pty.rs`）保留供后续 Phase（异步 Shell、交互命令）使用。
+```
+Rust Command → {shell} -c '{command}'  (stdio 全部 inherit)
+```
+
+- stdin/stdout/stderr 全部继承自父进程，子进程直接读写真实终端
+- 适用于实时输出（进度条、git clone）和交互输入（python REPL、read、TUI）
+- `cd` 命令不经过此路径，由 Rust 进程直接拦截
+
+#### Captured 模式（`exec_captured`）
+
+条件：有管道 `|` / 有 `@/Async` / `!!@Bash:`
+
+```
+Rust Command → script -e -q -c "{shell} -c '{command}'" /dev/null
+```
+
+- `script` 分配伪终端，命令感知到 TTY 后正常输出（解决 eza、ls --color=auto 等工具的 TTY 检测问题）
+- 使用 `Stdio::inherit()` 将真实终端 stdin 传给 `script`，确保 PTY 尺寸正确（否则 nushell 表格报 0 columns）
+- `script -e` 使退出码正确传递
+- stdout/stderr 通过 pipe 捕获为 String，用于管道传递或格式化输出
+- 支持超时机制：超时后发送 SIGTERM → SIGKILL 终止
+
+#### Bash 命令（`exec_bash`）
+
+`!!@Bash:` 专用路径：
+
+```
+Rust Command → script -e -q -c "bash -c '{args}'" /dev/null
+```
+
+- 直接构造 `bash -c` 命令，不经过 `exec_captured` 的 `{shell} -c` 双层包装
+- 输出使用亮黄色 `Bash:` 标识（`bash_output_prompt_fg`）
+
+#### 安全拦截
+
+所有命令在执行前通过 `check_safety()` 检查，匹配 `safety.deny_patterns` 中的任一模式则拒绝执行。
+
+#### 执行分派
+
+REPL 循环通过 `should_use_direct()` 判定模式：
+- 直连模式 → `dispatch_direct()`（仅 Shell/Interactive 类型）
+- Captured 模式 → `dispatch()`（所有类型，管道逐段执行）
 
 实现文件：
-- 执行核心: `src/executor/shell_exec.rs` — `exec_captured()`、`exec_cd()`、`shell_quote()`
-- 执行分派: `src/executor/mod.rs` — `dispatch()`
+- 执行核心: `src/executor/shell_exec.rs` — `exec_captured()`、`exec_shell_direct()`、`exec_bash()`、`exec_cd()`、`shell_quote()`、`wait_child_with_timeout()`
+- 执行分派: `src/executor/mod.rs` — `dispatch()`、`dispatch_direct()`、`check_safety()`
+- 模式判断: `src/repl/mod.rs` — `should_use_direct()`、`print_shell_prefix()`、`print_captured_output()`
 - PTY 基础设施（后续用）: `src/shell/pty.rs`
 - 提示符颜色: `src/repl/prompt.rs` — `colorize()`、`ansi_code()`
 
