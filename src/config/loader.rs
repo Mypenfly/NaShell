@@ -197,6 +197,85 @@ pub fn parse_kdl(content: &str) -> Result<NashellConfig, NashellError> {
     Ok(config)
 }
 
+/// 生成默认 KDL 配置内容。
+///
+/// 内容与 `NashellConfig::default()` 一致，格式为完整可编辑的 KDL 文件。
+fn default_config_kdl() -> String {
+    r#"// ===== NaShell 配置文件 =====
+// 修改后重新启动生效。
+// 删除此文件则下次启动自动重新生成默认配置。
+
+// ===== 程序启动显示 =====
+opening {
+    // 执行命令 (如 "fastfetch")
+    // exec ""
+    // 或显示文件中的横幅
+    // file ""
+}
+
+// ===== 提示符样式 =====
+prompts {
+    input_prompt_fg "green"
+    input_prompt_format "{path} |> "
+    input_continue_format ">> "
+    output_prompt_format "@System #>>"
+    output_prompt_fg "grey"
+    bash_output_prompt_fg "bright_yellow"
+    shell_type_fg "blue"
+}
+
+// ===== NaCommand 外部命令配置 =====
+// NaCommands {
+//     格式: <命令名> exec="<可执行文件>" long_argument=<true|false> [exec_script="<后缀>"]
+//     example exec="nu ./example.nu" long_argument=false
+// }
+
+// ===== 命令别名 =====
+// alias {
+//     ll "ls -la"
+// }
+
+// ===== Shell 设置 =====
+shell {
+    timeout_secs 120
+}
+
+// ===== 安全设置 =====
+safety {
+    deny_patterns "rm -rf /" "rm -rf /*" "sudo rm -rf"
+}
+
+// ===== 插件设置 =====
+plugins {
+    dir "~/.config/nashell/plugins"
+    max_recursion_depth 3
+}
+"#
+    .to_string()
+}
+
+/// 在指定路径生成默认配置文件。
+///
+/// 自动创建父目录。若文件已存在则跳过。
+fn write_default_config(path: &str) {
+    // 创建父目录
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            log::warn!("Failed to create config directory '{}': {}", parent.display(), e);
+            return;
+        }
+    }
+
+    match std::fs::write(path, default_config_kdl()) {
+        Ok(()) => {
+            log::info!("Generated default config at '{}'", path);
+        }
+        Err(e) => {
+            log::warn!("Failed to write default config to '{}': {}", path, e);
+        }
+    }
+}
+
 /// 从文件路径加载并解析 KDL 配置。
 ///
 /// 加载优先级：
@@ -205,6 +284,7 @@ pub fn parse_kdl(content: &str) -> Result<NashellConfig, NashellError> {
 /// 3. 内置默认值（文件不存在或无法解析时）
 ///
 /// 配置文件不存在时不报错，使用默认值。
+/// 若使用默认路径且文件不存在，自动生成一份带注释的默认配置文件。
 /// 解析失败时报告错误但继续使用默认值。
 ///
 /// # 参数
@@ -230,6 +310,10 @@ pub fn load_config(custom_path: Option<&str>) -> Result<NashellConfig, NashellEr
         Ok(content) => content,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             log::info!("Config file not found at '{}', using defaults", config_path);
+            // 仅在默认路径（非 env/custom）时生成配置文件
+            if custom_path.is_none() && std::env::var("NASHELL_CONFIG").is_err() {
+                write_default_config(&config_path);
+            }
             return Ok(NashellConfig::default());
         }
         Err(e) => {
