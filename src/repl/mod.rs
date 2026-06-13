@@ -2,7 +2,9 @@ pub mod input;
 pub mod prompt;
 
 use std::io::Write;
+use std::process::{Command, Stdio};
 
+use crate::config::alias;
 use crate::config::schema::NashellConfig;
 use crate::error::display::format_error;
 use crate::executor::{self, ExecContext};
@@ -19,16 +21,17 @@ fn show_opening(config: &NashellConfig) {
 
     if let Some(ref exec_cmd) = config.opening.exec {
         log::info!("Executing opening command: {}", exec_cmd);
-        match std::process::Command::new("sh")
+        // 使用 Stdio::inherit 使子进程直连终端，保留 ANSI 颜色输出
+        match Command::new("sh")
             .arg("-c")
             .arg(exec_cmd)
-            .output()
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .spawn()
         {
-            Ok(output) => {
-                let text = String::from_utf8_lossy(&output.stdout);
-                if !text.is_empty() {
-                    let _ = writeln!(stdout, "{}", text.trim_end());
-                }
+            Ok(mut child) => {
+                let _ = child.wait();
             }
             Err(e) => {
                 log::warn!("Failed to execute opening command '{}': {}", exec_cmd, e);
@@ -187,7 +190,14 @@ pub fn run(
             continue;
         }
 
-        match parser::parse(&input) {
+        // 展开别名（在解析之前）
+        let expanded = if config.aliases.is_empty() {
+            input
+        } else {
+            alias::expand_alias(&input, &config.aliases)
+        };
+
+        match parser::parse(&expanded) {
             Ok(raw_commands) => {
                 log::debug!(
                     "Parsed: {} command(s), long_arg={}, async={:?}",
