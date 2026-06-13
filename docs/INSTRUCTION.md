@@ -484,14 +484,24 @@ pub struct PluginsConfig {
 
 ### 3.3 Shell 命令执行流
 
-见 `docs/nashell_dev.md` 的 "Shell 命令执行（PTY 与 -c 的配合）" 章节。
+Shell 命令通过 `script -e -q -c "{shell} -c '{command}'" /dev/null` 在一次性 PTY 中执行。
+`script` 分配伪终端，命令感知到 TTY 后正常输出（解决 eza、ls --color=auto 等工具的 TTY 检测问题）。
+
+关键实现细节：
+- 使用 `Command::spawn()` + `Stdio::inherit()` 将真实终端 stdin 传给 `script`，
+  确保 `script` 能从 stdin 获取终端尺寸并正确设置 PTY 大小（否则 nushell 表格报 0 columns）
+- `script -e` 使退出码正确传递（`script` 默认总是返回 0）
+- `cd` 命令由 Rust 进程通过 `std::env::set_current_dir()` 直接拦截处理
+
+命令结束后 `script` 自动退出，无需哨兵或状态机。
+
+持久 PTY 会话（`src/shell/pty.rs`）保留供后续 Phase（异步 Shell、交互命令）使用。
 
 实现文件：
-- PTY 创建与管理: `src/shell/pty.rs`
-- cwd 同步: `src/shell/cwd_sync.rs`
-- PTY 交互执行: `src/executor/shell_exec.rs` — `exec_pty()`
-- -c 捕获执行: `src/executor/shell_exec.rs` — `exec_captured()`
-- Shell 管理器: `src/shell/manager.rs`
+- 执行核心: `src/executor/shell_exec.rs` — `exec_captured()`、`exec_cd()`、`shell_quote()`
+- 执行分派: `src/executor/mod.rs` — `dispatch()`
+- PTY 基础设施（后续用）: `src/shell/pty.rs`
+- 提示符颜色: `src/repl/prompt.rs` — `colorize()`、`ansi_code()`
 
 ### 3.4 NaCommand 执行流
 

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 /// 完整配置
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct NashellConfig {
     /// 启动时执行的命令或文件
     pub opening: OpeningConfig,
@@ -19,36 +19,13 @@ pub struct NashellConfig {
     pub plugins: PluginsConfig,
 }
 
-impl Default for NashellConfig {
-    fn default() -> Self {
-        NashellConfig {
-            opening: OpeningConfig::default(),
-            prompts: PromptsConfig::default(),
-            na_commands: HashMap::new(),
-            aliases: HashMap::new(),
-            shell: ShellConfig::default(),
-            safety: SafetyConfig::default(),
-            plugins: PluginsConfig::default(),
-        }
-    }
-}
-
 /// 启动配置
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct OpeningConfig {
     /// 启动时执行的命令
     pub exec: Option<String>,
     /// 启动时执行的文件
     pub file: Option<String>,
-}
-
-impl Default for OpeningConfig {
-    fn default() -> Self {
-        OpeningConfig {
-            exec: None,
-            file: None,
-        }
-    }
 }
 
 /// 提示符配置
@@ -111,18 +88,10 @@ impl Default for ShellConfig {
 }
 
 /// 安全配置
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SafetyConfig {
     /// 拒绝执行的命令模式列表
     pub deny_patterns: Vec<String>,
-}
-
-impl Default for SafetyConfig {
-    fn default() -> Self {
-        SafetyConfig {
-            deny_patterns: Vec::new(),
-        }
-    }
 }
 
 /// 插件配置

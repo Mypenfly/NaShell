@@ -1,3 +1,5 @@
+pub mod display;
+
 use std::fmt;
 
 /// NaShell 统一错误类型

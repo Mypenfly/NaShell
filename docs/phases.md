@@ -123,7 +123,21 @@
 
 ---
 
-## Phase 3: 命令解析器
+### Phase 2 复盘要点（Phase 3 开始前必须注意）
+
+以下问题在 Phase 2 审查中发现并已在 Phase 2 修复。进入 Phase 3 时需继续保持：
+
+1. **Editor 必须复用**：`rustyline::DefaultEditor` 在 REPL 循环中只创建一次（`repl/mod.rs` 中持有），通过 `read_line_with_editor` 复用。禁止每次 `read_line` 调用时重新创建，否则历史记录丢失且有 TTY 初始化开销。
+
+2. **配置必须生效**：提示符格式来源为 `PromptsConfig::input_prompt_format`（默认 `"{path} |> "`），通过 `prompt::generate_prompt(cwd, home, format)` 的第三个参数传入。禁止硬编码格式字符串。
+
+3. **错误显示模块已就位**：`src/error/display.rs` 提供了 `format_error(err: &NashellError) -> String`，输出 `@Error #>>\n{类型}: {描述}` 格式。后续所有错误输出必须通过此函数统一格式化。
+
+4. **文件组织持续遵循** `INSTRUCTION.md` 1.1 规范——每个结构体/trait/enum 独立文件，同类功能同一文件夹。
+
+---
+
+## Phase 3: 命令解析器 ✅ 已完成
 
 **目标**：完整解析用户输入为 `RawCommands` 结构体，支持多行输入、`@/` 截止符、管道分割、命令类型识别。
 
@@ -138,109 +152,133 @@
 
 ### 任务
 
-1. **创建 `src/parser/lexer.rs`**
+1. ✅ **创建 `src/parser/lexer.rs`**
    - `tokenize(input: &str) -> Result<Vec<Token>, NashellError>`: 将原始输入转为 token 流
    - Token 类型包括：前缀标记（`!@`/`!!@`/`!`）、命令词、参数、管道 `|`、截止符 `@/`、引号字符串
    - 实现 `detect_bash_shortcut(input: &str) -> Option<String>`: 检测 `!!@Bash:` 前缀，返回 Bash 参数
    - 实现 `detect_async_marker(first_line: &str) -> Option<String>`: 检测 `@/Async(name)`，返回 name
    - 正确处理引号内内容（引号内的 `|`、`@/` 不被识别为分隔符）
 
-2. **创建 `src/parser/long_arg.rs`**
+2. ✅ **创建 `src/parser/long_arg.rs`**
    - `extract_long_argument(input: &str) -> Result<(String, Option<String>), NashellError>`:
      - 规则 A（优先）：查找 `@/`，之前的内容为命令语句，之后的内容为 long_argument
      - 规则 B（回退）：无 `@/` 时查找首个空行分割
      - 规则 C：两项皆无，long_argument 为 None
    - 返回 `(命令语句部分, long_argument)`
 
-3. **创建 `src/parser/pipeline.rs`**
+3. ✅ **创建 `src/parser/pipeline.rs`**
    - `split_pipeline(cmd_part: &str) -> Result<Vec<String>, NashellError>`: 按 `|` 分割命令段
    - 保护引号内的 `|`
 
-4. **创建 `src/parser/mod.rs`**
+4. ✅ **创建 `src/parser/mod.rs`**
    - `parse(input: &str) -> Result<RawCommands, NashellError>`: 完整解析流程
    - 整合 lexer → long_arg → pipeline 各步骤
    - 填充 `RawCommands.commands`（识别每个段的 `CmdType`）、`long_argument`、`async_name`
 
-5. **更新 `src/repl/input.rs`**
+5. ✅ **更新 `src/repl/input.rs`**
    - 实现多行输入：首行 `|>` 提示符，后续行 `>>` 提示符
    - 收集所有行直到用户输入空行（仅回车）或输入 `@/` 后按 Enter 结束输入
    - 多行输入时首行自动检测：若首行末尾有 `@/` → 自动进入多行模式
 
-6. **更新 REPL 循环**
+6. ✅ **更新 REPL 循环**
    - 输入收集后调用 `parse()` 并打印解析结果（debug 级别日志）
 
 ### 验证
-- 单行输入 `ls -la` → 解析为 1 个 `Shell` 类型命令
-- 多行输入 `!@Write:./test.py @/` + 多行内容 → 正确提取 long_argument
-- `!@Open:./src -l 200` → 识别为 `NaCommandNormal`，cmd=`open`
-- `!!@Shell:Watch -i "abc" -c 3` → 识别为 `NaCommandSystem`，cmd=`shell`，mode=`watch`
-- `ls | grep foo` → 按管道分割为 2 个 `Shell` 命令段
-- `ls | !@Write:./out.txt @/` → 管道分割正确，long_argument 被提取
-- 引号内的 `|` 不被分割
-- `!!@Bash: ls -la` → Bash shortcut 检测生效
+- [x] 单行输入 `ls -la` → 解析为 1 个 `Shell` 类型命令
+- [x] 多行输入 `!@Write:./test.py @/` + 多行内容 → 正确提取 long_argument
+- [x] `!@Open:./src -l 200` → 识别为 `NaCommandNormal`，cmd=`Open`（大小写保留，Phase 5 查表时转小写）
+- [x] `!!@Shell:Watch -i "abc" -c 3` → 识别为 `NaCommandSystem`，cmd=`Shell`，mode=`Watch` 在 args[0] 中
+- [x] `ls | grep foo` → 按管道分割为 2 个 `Shell` 命令段
+- [x] `ls | !@Write:./out.txt @/` → 管道分割正确，long_argument 被提取
+- [x] 引号内的 `|` 不被分割
+- [x] `!!@Bash: ls -la` → Bash shortcut 检测生效，cmd_type=`NaCommandSystem`
+
+测试覆盖：141 个单元测试全部通过，`cargo build` 成功。
+
+---
+
+### Phase 3 复盘要点（Phase 4 开始前必须注意）
+
+以下问题在 Phase 3 审查中发现并已修复。进入 Phase 4 时需继续保持：
+
+1. **`!!@Bash:` 命令类型已修正**：解析器返回 `cmd_type=CmdType::NaCommandSystem`、`cmd="bash"`（小写）。Bash 命令参数在 `args[0]` 中作为原始字符串传递。Phase 6 实现 Bash 命令时注意 `bash_args` 需正确传给 `bash -c`。
+
+2. **`long_argument` 空字符串归一化**：`parse()` 中将 `Some("")` 归一化为 `None`。Phase 5+ 可以信任 `long_argument` 为 `None`（无长参数）或 `Some(non-empty)`（有长参数），无需额外判断空字符串。
+
+3. **NaCommand 命令名大小写**：解析器保留用户输入的原始大小写（如 `"Open"`、`"Shell"`）。Phase 5 的 Registry 查表阶段负责统一转小写匹配（`INSTRUCTION.md` 六.9）。
+
+4. **Mode 提取时机**：`!!@Shell:Watch` 的 mode（`"Watch"`）当前在 `RawCmd.args[0]` 中。Phase 5 需从 `RawCmd` 构建 `NaCommand` 时提取 `mode` 字段。
+
+5. **dead_code 警告可忽略**：当前 24 个 dead_code 警告均来自 Phase 4-6 将使用的数据结构（`NaCommand`、`Shell`、`ShellCmd`、`ShellOut`、`CmdMeta` 等），Phase 4 开始逐步消除。
+
+6. **解析性能**：tokenizer 逐字符处理并分配 `Vec<char>`，当前在小输入下性能足够。Phase 11 可优化为基于 `&str` 切片的零拷贝解析。
+
+7. **文件组织持续遵循** `INSTRUCTION.md` 1.1 规范——parser/ 下 lexer、long_arg、pipeline、syntax、mod 各司其职。
 
 ---
 
 ## Phase 4: Shell 管理 (PTY)
 
-**目标**：启动 PTY 持久 shell，支持 PTY 交互执行和 `-c` 捕获执行两种模式。
+**目标**：实现 shell 命令执行，支持持久状态（cd）和 TTY 感知输出。
+
+**设计决策**：Phase 4 采用**方案 B：`script -e -q -c` 一次性 PTY** 而非持久 PTY 会话。
+
+原因：
+- 持久 PTY（`portable-pty`）需要哨兵机制检测命令完成，在 `.bashrc` 的 `PROMPT_COMMAND` 干扰下不可靠
+- `script -e -q -c` 是 Unix 标准工具，命令结束进程自动退出，无需哨兵/状态机
+- 对 `cd` 命令，由 Rust 进程通过 `std::env::set_current_dir()` 直接切换并更新提示符
+- 颜色输出：`script` 提供 TTY 环境 + `TERM=xterm-256color`，解决 eza/ls 等工具的 TTY 检测问题
+- nushell 表格：使用 `Stdio::inherit()` 传真实终端 stdin，`script` 从中获取尺寸并正确设置 PTY 大小
+- 退出码：`script -e` 传递子进程退出码
+
+执行链路：`Rust spawn → script -e -q -c "{shell} -c '{command}'" /dev/null`
 
 ### 参考文档
 
 | 内容 | 位置 |
 |------|------|
-| PTY 持久化方案 | `nashell_dev.md` → 架构总览 → PTY 持久化方案说明 |
-| PTY vs -c 配合 | `nashell_dev.md` → Shell 命令执行（PTY 与 -c 的配合） |
+| `script` 方案说明 | 本文件 Phase 4 设计决策 |
+| PTY 持久化方案（后续 Phase 再用） | `nashell_dev.md` → 架构总览 → PTY 持久化方案说明 |
 | Shell 管理数据结构 | `nashell_dev.md` → Shell 管理数据结构 |
 | Shell 命令执行流 | `INSTRUCTION.md` → 3.3 Shell 命令执行流 |
-| 线程模型 | `INSTRUCTION.md` → 4.2 线程模型 |
-| channel 通信 | `INSTRUCTION.md` → 4.3 channel 通信 |
-| Shell 数据结构 | `INSTRUCTION.md` → 2.3 Shell 管理 |
+| Shell 数据结构（后续 Phase 用） | `INSTRUCTION.md` → 2.3 Shell 管理 |
 
 ### 任务
 
-1. **创建 `src/shell/pty.rs`**
-   - `spawn_pty(shell_type: &str) -> Result<PtyHandle, NashellError>`: 创建 PTY 并启动 `nu` 或 `bash`
-   - `resize_pty(handle: &PtyHandle, cols: u16, rows: u16) -> Result<(), NashellError>`: 调整 PTY 窗口大小
-   - `write_to_pty(handle: &PtyHandle, input: &str) -> Result<(), NashellError>`: 写入命令文本
-   - `read_from_pty(handle: &PtyHandle) -> Result<String, NashellError>`: 非阻塞读取输出
-   - PTY 退出时自动检测并返回错误
-
-2. **创建 `src/shell/cwd_sync.rs`**
-   - `sync_cwd(shell: &Shell) -> Result<PathBuf, NashellError>`: 轮询 `/proc/{pid}/cwd` 获取当前工作目录
-   - 或者监听 PTY 输出中的 OSC 7 转义序列
-   - 返回当前工作路径，用于更新提示符
-
-3. **创建 `src/shell/manager.rs`**
-   - `ShellManager` 结构体：管理 main shell + async shells（`HashMap<String, Shell>`）
-   - `init_main_shell() -> Result<Shell, NashellError>`: 启动 main PTY
-   - `send_cmd(shell: &Shell, cmd: ShellCmd) -> Result<(), NashellError>`: 发送命令
-   - `recv_out(shell: &Shell) -> Result<ShellOut, NashellError>`: 接收输出
-   - `destroy_shell(name: &str) -> Result<(), NashellError>`: 销毁指定 shell
-   - `create_async_shell(name: &str) -> Result<Shell, NashellError>`: 创建异步 shell
-
-4. **创建 `src/executor/shell_exec.rs`**
-   - `exec_pty(input: &str, shell: &Shell) -> Result<String, NashellError>`: 在 PTY 中交互执行
-   - `exec_captured(cmd: &str, args: &[String], shell_type: &str) -> Result<CapturedOutput, NashellError>`: 通过 -c 捕获执行
+1. **创建 `src/executor/shell_exec.rs`**
+   - `exec_captured(cmd, args, shell_type)`: 通过 `script -e -q -c` 在 PTY 中执行，使用 `Stdio::inherit()` 传真实终端 stdin 以确保 PTY 尺寸正确
+   - `exec_cd(args)`: 拦截 cd 命令，通过 `std::env::set_current_dir()` 切换目录
+   - `shell_quote(s)`: 单引号转义辅助函数
    - `CapturedOutput` 结构体：stdout、stderr、exit_code
 
-5. **创建 `src/executor/mod.rs`**
-   - 初始化 executor，持有 `ShellManager`
-   - 分派函数 `dispatch(cmd: &RawCmd, ctx: &ExecContext) -> Result<String, NashellError>`（Phase 5 完善 NaCommand 分支）
+2. **更新 `src/executor/mod.rs`**
+   - `dispatch()`: Shell 命令统一走 `exec_captured`；`cd` 命令走 `exec_cd`
+   - `ExecContext` 不再持有 PTY 引用
+
+3. **更新 `src/repl/mod.rs`**
+   - REPL 循环不再传递 `PtySession`
+   - 提示符使用 `prompt::colorize()` 按配置着色
+
+4. **创建 `src/repl/prompt.rs`**
+   - `generate_prompt()`: 生成路径提示符
+   - `colorize()`: ANSI 前景色包装
+   - `ansi_code()`: 颜色名到 ANSI 码映射
+
+5. **创建 `src/shell/pty.rs`（保留供后续 Phase）**
+   - PTY 创建与 send_command 实现，当前主路径不调用
 
 6. **更新 `src/app/init.rs`**
-   - 检测 `nu` 可用性：`which nu` 或尝试运行 `nu --version`
-   - 不在 `config.kdl` 中，运行时自动检测
-   - 确定 shell_type: `"nu"` 或 `"bash"`
+   - `detect_shell_type()`: 检测 `nu` 或 `bash` 可用性
 
 ### 验证
-- 启动程序，main PTY shell 运行正常
-- 输入 `ls -la` → 通过 PTY 实时显示目录内容
-- 输入 `cd /tmp` → PTY 内部切换目录，提示符路径更新
-- 输入 `pwd` → 显示正确的当前路径
-- `echo "hello"` → 实时输出 hello
-- 非零退出码命令（如 `ls /nonexistent`）→ 显示错误但不崩溃
-- PTY 退出异常 → 尝试自动重启 main shell
+- 启动程序，提示符绿色显示当前路径
+- 输入 `ls -la` → 正常显示目录内容（含颜色）
+- 输入 `eza` → 正常显示（script 提供 TTY）
+- 输入 `nu -c 'ls'` 或 nu 环境下 `ls` → nushell 表格正常渲染（PTY 尺寸正确）
+- 输入 `cd /tmp` → 提示符路径更新为 `/tmp`
+- 输入 `pwd` → 显示 `/tmp`
+- `echo "hello"` → 输出 hello
+- 非零退出码命令（如 `ls /nonexistent`）→ 显示错误但不崩溃，退出码正确传递
 
 ---
 

@@ -1,3 +1,5 @@
+pub mod init;
+
 /// 命令级别（与 NaLevel 对应但用于查表阶段）
 #[derive(Debug, Clone, PartialEq)]
 pub enum Level {
@@ -36,7 +38,7 @@ pub struct PluginMeta {
 }
 
 /// 程序运行时全局数据
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct AppData {
     /// 内置命令注册表
     pub builtin_cmds: Vec<CmdMeta>,
@@ -46,15 +48,6 @@ pub struct AppData {
     pub plugins: Vec<PluginMeta>,
 }
 
-impl Default for AppData {
-    fn default() -> Self {
-        AppData {
-            builtin_cmds: Vec::new(),
-            config_cmds: Vec::new(),
-            plugins: Vec::new(),
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
