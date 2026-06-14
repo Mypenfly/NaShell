@@ -244,6 +244,23 @@ impl CommandRegistry {
                     style_note("注意:")
                 ),
             );
+            m.insert(
+                "nacmds".to_string(),
+                format!(
+                    "{}\n  列出所有已注册的 NaCommand（内置 / 用户配置 / 插件）。\n\n  {}  \
+                     \n    NaCmds:          默认模式，表格输出命令名、级别、来源\n    \
+                     NaCmds:Detail     详细模式，包含帮助信息\n    \
+                     NaCmds:Help       显示此帮助\n\n  {}  \
+                     \n    -j / --json      以 JSON 格式输出\n\n  {}  \
+                     \n    {}\n    {}",
+                    style_cmd_name("NaCmds"),
+                    style_section("模式:"),
+                    style_section("选项:"),
+                    style_section("使用示例:"),
+                    style_code("!@NaCmds:"),
+                    style_code("!@NaCmds:Detail -j"),
+                ),
+            );
             m
         };
 
@@ -257,7 +274,18 @@ impl CommandRegistry {
             }
         }
 
-        // For plugin/config commands, return a generic message
+        // For config commands, return a generic message
+        for cmd in &self.config_cmds {
+            if cmd.name.to_lowercase() == lower_name {
+                return Ok(format!(
+                    "{} (用户配置命令)\n执行外部程序: {}\n使用 Help 模式获取该程序的帮助信息。",
+                    style_cmd_name(cmd_name),
+                    cmd.exec,
+                ));
+            }
+        }
+
+        // For plugin commands, return a generic message
         // (Actual help is obtained by sending a call message with mode="help")
         for cmd in &self.plugin_cmds {
             if cmd.name.to_lowercase() == lower_name {
@@ -482,5 +510,66 @@ mod tests {
         registry.load_plugins(&plugins);
         assert_eq!(registry.plugin_cmds.len(), 1);
         assert!(registry.lookup("cmd1").is_ok());
+    }
+
+    #[test]
+    fn test_lookup_with_source_config() {
+        let mut registry = CommandRegistry::new();
+        registry.config_cmds.push(CmdMeta {
+            level: Level::Normal,
+            name: "websearch".to_string(),
+            exec: "nu ./web_search.nu".to_string(),
+            long_argument: false,
+            exec_script: None,
+            known_modes: vec![],
+        });
+
+        let (meta, source) = registry.lookup_with_source("websearch").unwrap();
+        assert_eq!(meta.name, "websearch");
+        assert_eq!(source, LookupSource::Config);
+        assert_eq!(meta.exec, "nu ./web_search.nu");
+    }
+
+    #[test]
+    fn test_get_help_config_command() {
+        let mut registry = CommandRegistry::new();
+        registry.config_cmds.push(CmdMeta {
+            level: Level::Normal,
+            name: "websearch".to_string(),
+            exec: "nu ./web_search.nu".to_string(),
+            long_argument: false,
+            exec_script: None,
+            known_modes: vec![],
+        });
+
+        let help = registry.get_help("websearch", None).unwrap();
+        assert!(help.contains("websearch"));
+        assert!(help.contains("用户配置命令"));
+        assert!(help.contains("nu ./web_search.nu"));
+    }
+
+    #[test]
+    fn test_lookup_priority_config_over_plugin() {
+        let mut registry = CommandRegistry::new();
+        registry.config_cmds.push(CmdMeta {
+            level: Level::Normal,
+            name: "mycmd".to_string(),
+            exec: "my_config_exec".to_string(),
+            long_argument: false,
+            exec_script: None,
+            known_modes: vec![],
+        });
+        registry.plugin_cmds.push(CmdMeta {
+            level: Level::Normal,
+            name: "mycmd".to_string(),
+            exec: "my_plugin_exec".to_string(),
+            long_argument: true,
+            exec_script: None,
+            known_modes: vec![],
+        });
+
+        let (meta, source) = registry.lookup_with_source("mycmd").unwrap();
+        assert_eq!(meta.exec, "my_config_exec");
+        assert_eq!(source, LookupSource::Config);
     }
 }

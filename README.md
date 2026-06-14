@@ -72,6 +72,7 @@ NaShell Process
 | `!@Open:` | Normal | Open file or directory. Syntax highlighting for files, tree view for dirs. |
 | `!!@Bash:` | System | Execute via `bash -c`. Highest parse priority, bypasses all other rules. |
 | `!!@Shell:` | System | Manage shell threads. Modes: (default), Watch, Destroy, Switch. |
+| `!@NaCmds:` | System | List all registered commands. Modes: (default table), Detail (with help), `-j/--json`. |
 
 ## Plugin System
 
@@ -208,14 +209,16 @@ src/
 │   ├── shell_exec.rs    # exec_captured, exec_shell_direct, exec_bash, exec_cd
 │   └── async_exec.rs    # spawn_async_shell_exec: full parse→dispatch in background
 ├── nacommand/
-│   ├── mod.rs           # Execute NaCommand: builtin/plugin dispatch
+│   ├── mod.rs           # Execute NaCommand: builtin/config/plugin dispatch
 │   ├── cmd.rs           # NaCommand, NaLevel structs
 │   ├── registry.rs      # Command registry, lookup, help
+│   ├── external.rs      # External config command execution (Phase 8)
 │   └── builtin/
 │       ├── write.rs     # Write command
 │       ├── open.rs      # Open command (syntax highlighting)
 │       ├── bash.rs      # Bash command (!!@Bash:)
-│       └── shell_cmd.rs # Shell management (!!@Shell:)
+│       ├── shell_cmd.rs # Shell management (!!@Shell:)
+│       └── na_cmds.rs   # Command registry listing (!@NaCmds:)
 ├── shell/
 │   ├── actor.rs         # Shell struct
 │   ├── cmd.rs           # ShellCmd enum
@@ -260,7 +263,7 @@ src/
 ## Development
 
 ```bash
-# Run all tests (284 tests)
+# Run all tests (306 tests)
 cargo test
 
 # Lint

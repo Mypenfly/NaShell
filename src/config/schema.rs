@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 /// 完整配置
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct NashellConfig {
     /// 启动时执行的命令或文件
     pub opening: OpeningConfig,
@@ -17,6 +17,23 @@ pub struct NashellConfig {
     pub safety: SafetyConfig,
     /// 插件配置
     pub plugins: PluginsConfig,
+    /// 配置文件所在目录（用于解析 exec 相对路径）
+    pub config_dir: Option<String>,
+}
+
+impl Default for NashellConfig {
+    fn default() -> Self {
+        NashellConfig {
+            opening: OpeningConfig::default(),
+            prompts: PromptsConfig::default(),
+            na_commands: HashMap::new(),
+            aliases: HashMap::new(),
+            shell: ShellConfig::default(),
+            safety: SafetyConfig::default(),
+            plugins: PluginsConfig::default(),
+            config_dir: None,
+        }
+    }
 }
 
 /// 启动配置

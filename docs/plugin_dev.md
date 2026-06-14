@@ -619,11 +619,73 @@ if __name__ == "__main__":
 | `TOEXEC_MAX_DEPTH` | 3 | toExec 最大递归深度 |
 | `PLUGIN_RECV_TIMEOUT_SECS` | 90 | 插件响应读取超时（call 后等待 response） |
 | `PLUGIN_TIMEOUT_SECS` | 30 | 插件进程关闭超时 |
+| `PLUGIN_TIMEOUT_SECS` | 30 | 插件进程关闭超时 |
 | `DEFAULT_SHELL_TIMEOUT_SECS` | 120 | Shell 命令默认超时 |
 
 ---
 
-## 十、参考实现
+## 十、`!@NaCmds:` — 命令发现
+
+NaShell 内置了一个 `NaCmds` System 级命令，允许插件（和用户）查询当前所有已注册的 NaCommand 列表。
+
+### 用途
+
+插件可以使用 `NaCmds` 发现系统中可用的命令（包括其他插件注册的命令），从而：
+- 动态构建命令调用
+- 检查命令是否存在后再调用
+- 生成帮助文档或命令索引
+
+### 使用方式
+
+```
+!@NaCmds:                    # 默认模式：表格列出所有命令名、级别、来源
+!@NaCmds:Detail              # 详细模式：包含帮助摘要
+!@NaCmds:Detail -j           # JSON 格式输出，含完整帮助文本（ANSI 码已清洗）
+!@NaCmds:Help                # 显示帮助
+```
+
+### JSON 输出格式
+
+```json
+{
+  "version": "1.0",
+  "commands": [
+    {
+      "name": "write",
+      "level": "Normal",
+      "source": "Builtin",
+      "plugin": "",
+      "help": "Write\n  将内容写入文件。\n\n  参数:\n  path    目标文件路径..."
+    },
+    {
+      "name": "demo",
+      "level": "Normal",
+      "source": "Plugin",
+      "plugin": "demo_plugin",
+      "help": "Demo — 演示插件..."
+    }
+  ]
+}
+```
+
+| 字段 | 说明 |
+|------|------|
+| `name` | 命令名（小写） |
+| `level` | 级别：`Normal` 或 `System` |
+| `source` | 来源：`Builtin`（内置）、`Config`（用户配置）、`Plugin`（插件注册） |
+| `plugin` | 所属插件名（仅 source=Plugin 时有值） |
+| `help` | 帮助文本（detail 模式）。内置命令为内置帮助，外部命令为 `--help` 输出，插件命令通过 call/response 协议获取 |
+
+### 注意事项
+
+- **`help` 字段仅在 Detail 模式下包含**（默认模式不含此字段以减少开销）
+- **JSON 输出中的 ANSI 彩色码已被清洗**，适合程序化处理
+- **插件帮助采用 call/response 协议获取**：主程序向各插件发送 `mode="help"` 的 call 消息，收集 off 中的 `out_content` 作为帮助文本
+- **默认模式输出为人类可读表格**，JSON 模式用于程序化消费
+
+---
+
+## 十一、参考实现
 
 完整的测试插件位于项目 `test_plugins/demo_plugin/`，演示了以下功能：
 

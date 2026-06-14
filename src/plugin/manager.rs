@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io::{BufReader, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -159,6 +159,129 @@ impl PluginManager {
             })?;
 
         send_message(stdin, &msg)
+    }
+
+    /// 获取插件命令的帮助信息（发送 help 模式的 call 并收集响应）。
+    ///
+    /// 与 `recv_responses` 不同，此方法不会执行 toExec 命令，
+    /// 且读取完毕后会将 stdout 归还给 handle，允许后续继续使用。
+    ///
+    /// # 参数
+    /// - `handle`: 插件进程句柄
+    /// - `command`: 命令名
+    ///
+    /// # 返回
+    /// - `Ok(String)`: 收集到的帮助文本
+    /// - `Err(NashellError)`: 通信错误
+    pub fn get_command_help(
+        handle: &mut PluginHandle,
+        command: &str,
+    ) -> Result<String, NashellError> {
+        // 发送 help 模式的 call
+        let call = PluginCall {
+            command: command.to_string(),
+            mode: "help".to_string(),
+            level: "normal".to_string(),
+            params: vec![],
+            long_argument: None,
+        };
+        Self::send_call(handle, &call)?;
+
+        // 获取 stdout 并读取响应
+        let plugin_name = handle.name().to_string();
+        let stdout = handle.child.stdout.take().ok_or_else(|| NashellError::Plugin {
+            plugin_name: plugin_name.clone(),
+            detail: "无法获取插件 stdout".to_string(),
+        })?;
+
+        // 看门狗线程（超时保护）
+        let timed_out = Arc::new(AtomicBool::new(false));
+        let pid = handle.child.id();
+        {
+            let timed_out = timed_out.clone();
+            let watchdog_name = plugin_name.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_secs(PLUGIN_RECV_TIMEOUT_SECS));
+                timed_out.store(true, Ordering::SeqCst);
+                log::warn!(
+                    "插件 '{}' 响应超时 ({}s)，强制终止 pid={}",
+                    watchdog_name,
+                    PLUGIN_RECV_TIMEOUT_SECS,
+                    pid
+                );
+                unsafe {
+                    libc::kill(pid as i32, libc::SIGTERM);
+                    std::thread::sleep(Duration::from_secs(2));
+                    libc::kill(pid as i32, libc::SIGKILL);
+                }
+            });
+        }
+
+        let mut reader = BufReader::new(stdout);
+        let mut help_parts: Vec<String> = Vec::new();
+        let mut line_buf = String::new();
+
+        loop {
+            line_buf.clear();
+            let bytes_read = reader.read_line(&mut line_buf).map_err(|e| NashellError::Plugin {
+                plugin_name: plugin_name.clone(),
+                detail: format!("读取插件输出失败: {}", e),
+            })?;
+
+            if bytes_read == 0 {
+                break;
+            }
+
+            if timed_out.load(Ordering::SeqCst) {
+                // 归还 stdout
+                let inner = reader.into_inner();
+                handle.child.stdout = Some(inner);
+                return Err(NashellError::Timeout {
+                    command: format!("plugin:{}:help", command),
+                    seconds: PLUGIN_RECV_TIMEOUT_SECS,
+                });
+            }
+
+            let trimmed = line_buf.trim().to_string();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            match serde_json::from_str::<PluginMessage>(&trimmed) {
+                Ok(msg) => match msg {
+                    PluginMessage::Response { data, .. } => {
+                        if !data.out_content.is_empty() {
+                            help_parts.push(data.out_content);
+                        }
+                    }
+                    PluginMessage::Off { data, .. } => {
+                        if !data.out_content.is_empty() {
+                            help_parts.push(data.out_content);
+                        }
+                        break;
+                    }
+                    _ => break,
+                },
+                Err(e) => {
+                    log::warn!(
+                        "插件 '{}' JSON 解析失败: {} (raw={})",
+                        plugin_name,
+                        e,
+                        trimmed.chars().take(200).collect::<String>()
+                    );
+                }
+            }
+        }
+
+        // 归还 stdout 到 handle，允许后续调用继续使用
+        let inner = reader.into_inner();
+        handle.child.stdout = Some(inner);
+
+        if help_parts.is_empty() {
+            Ok(format!("(插件 {} 未返回帮助信息)", plugin_name))
+        } else {
+            Ok(help_parts.join("\n"))
+        }
     }
 
     /// 从插件接收 response 消息直到收到 off 消息。

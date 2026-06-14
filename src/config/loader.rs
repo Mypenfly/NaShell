@@ -306,6 +306,10 @@ pub fn load_config(custom_path: Option<&str>) -> Result<NashellConfig, NashellEr
         return Ok(NashellConfig::default());
     };
 
+    let config_dir = std::path::Path::new(&config_path)
+        .parent()
+        .map(|p| p.to_string_lossy().to_string());
+
     let content = match std::fs::read_to_string(&config_path) {
         Ok(content) => content,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -327,7 +331,8 @@ pub fn load_config(custom_path: Option<&str>) -> Result<NashellConfig, NashellEr
     };
 
     match parse_kdl(&content) {
-        Ok(config) => {
+        Ok(mut config) => {
+            config.config_dir = config_dir;
             log::info!("Config loaded successfully from '{}'", config_path);
             Ok(config)
         }

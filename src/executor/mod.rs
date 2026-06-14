@@ -40,6 +40,8 @@ pub struct ExecContext {
     pub shell_manager: Option<Arc<Mutex<ShellManager>>>,
     /// 插件管理器（用于插件命令执行）
     pub plugin_manager: Option<Arc<Mutex<PluginManager>>>,
+    /// 配置文件所在目录（用于解析外部命令 exec 相对路径）
+    pub config_dir: Option<String>,
 }
 
 /// 检查命令是否匹配安全拦截模式。
@@ -70,10 +72,10 @@ pub(crate) fn check_safety(command: &str, patterns: &[String]) -> Result<(), Nas
 /// 根据命令类型设置 NaLevel。命令名统一转小写。
 ///
 /// **Mode 提取规则**（查表法）：
-/// - 从 registry 中查找该命令的 `known_modes`（小写）。
-/// - 若 args[0] 匹配已知 mode（大小写不敏感），提取为 `NaCommand.mode` 并从 args 移除。
-/// - 若不匹配，args[0] 保持为普通参数。
-/// - 外部/插件命令的 `known_modes` 为空，不做 mode 提取，args 原样透传。
+/// - "help" 是保留模式，所有命令（含外部/插件）均识别。
+/// - 若 args[0] 为 "help"（大小写不敏感），提取为 `NaCommand.mode`。
+/// - 若 args[0] 匹配 `known_modes` 中的模式（大小写不敏感），提取为 mode。
+/// - `known_modes` 为空且 args[0] 非 "help" 时不做提取，args 原样透传。
 ///
 /// # 参数
 /// - `cmd`: 解析后的命令
@@ -98,10 +100,19 @@ fn build_nacommand(
         .map(|meta| meta.known_modes.clone())
         .unwrap_or_default();
 
-    // 查表法提取 mode：args[0] 匹配已知 mode → mode，否则 → arg
-    let (mode, args) = if !known_modes.is_empty() && !cmd.args.is_empty() {
+    // 查表法提取 mode：
+    //   0. "help" 是所有命令的保留模式，优先提取
+    //   1. args[0] 匹配已知 mode → mode，否则 → arg
+    //   2. known_modes 为空且非 "help" → 不做提取，args 原样透传
+    let (mode, args) = if !cmd.args.is_empty() {
         let first_lower = cmd.args[0].to_lowercase();
-        if known_modes.iter().any(|m| m.to_lowercase() == first_lower) {
+
+        // "help" 是所有命令的保留模式
+        if first_lower == "help" {
+            (Some("help".to_string()), cmd.args[1..].to_vec())
+        } else if !known_modes.is_empty()
+            && known_modes.iter().any(|m| m.to_lowercase() == first_lower)
+        {
             (Some(first_lower), cmd.args[1..].to_vec())
         } else {
             (None, cmd.args.clone())
@@ -203,6 +214,7 @@ pub fn dispatch(cmd: &RawCmd, ctx: &mut ExecContext, out_writer: &mut dyn Write)
                 &ctx.shell_type,
                 &ctx.deny_patterns,
                 out_writer,
+                ctx.config_dir.as_deref().map(std::path::Path::new),
             )?;
             Ok((output, OutputType::NaCommand))
         }
@@ -259,6 +271,7 @@ mod tests {
             registry: None,
             shell_manager: None,
             plugin_manager: None,
+            config_dir: None,
         }
     }
 
@@ -449,5 +462,51 @@ mod tests {
         assert_eq!(nacmd.mode.as_deref(), Some("watch"));
         assert_eq!(nacmd.args, vec!["-i", "abc"]);
         assert!(matches!(nacmd.level, NaLevel::System));
+    }
+
+    #[test]
+    fn test_build_nacommand_external_help_is_reserved() {
+        // 外部命令 known_modes 为空，但 "help" 是保留模式 → 提取为 mode
+        let mut registry = CommandRegistry::new();
+        registry.config_cmds.push(crate::app::CmdMeta {
+            level: crate::app::Level::Normal,
+            name: "websearch".to_string(),
+            exec: "python3 ./web_search.py".to_string(),
+            long_argument: false,
+            exec_script: None,
+            known_modes: vec![],
+        });
+        let cmd = RawCmd {
+            cmd_type: CmdType::NaCommandNormal,
+            cmd: "WebSearch".to_string(),
+            args: vec!["Help".to_string()],
+        };
+        let nacmd = build_nacommand(&cmd, None, &registry);
+        assert_eq!(nacmd.cmd, "websearch");
+        assert_eq!(nacmd.mode.as_deref(), Some("help"));
+        assert!(nacmd.args.is_empty());
+    }
+
+    #[test]
+    fn test_build_nacommand_external_non_help_stays_arg() {
+        // 外部命令 known_modes 为空，非 "help" 的第一词保持为 arg
+        let mut registry = CommandRegistry::new();
+        registry.config_cmds.push(crate::app::CmdMeta {
+            level: crate::app::Level::Normal,
+            name: "websearch".to_string(),
+            exec: "python3 ./web_search.py".to_string(),
+            long_argument: false,
+            exec_script: None,
+            known_modes: vec![],
+        });
+        let cmd = RawCmd {
+            cmd_type: CmdType::NaCommandNormal,
+            cmd: "WebSearch".to_string(),
+            args: vec!["rust".to_string(), "async".to_string(), "-n".to_string(), "5".to_string()],
+        };
+        let nacmd = build_nacommand(&cmd, None, &registry);
+        assert_eq!(nacmd.cmd, "websearch");
+        assert_eq!(nacmd.mode, None);
+        assert_eq!(nacmd.args, vec!["rust", "async", "-n", "5"]);
     }
 }

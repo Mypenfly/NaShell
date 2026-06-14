@@ -92,6 +92,27 @@ fn main() {
             "help".to_string(),
         ],
     });
+    registry.register_builtin(CmdMeta {
+        level: Level::System,
+        name: "nacmds".to_string(),
+        exec: "n_nacmds".to_string(),
+        long_argument: false,
+        exec_script: None,
+        known_modes: vec!["detail".to_string(), "help".to_string()],
+    });
+
+    // 加载用户配置的外部 NaCommand 到注册表
+    for (name, ext_cfg) in &config.na_commands {
+        registry.config_cmds.push(CmdMeta {
+            level: Level::Normal,
+            name: name.clone(),
+            exec: ext_cfg.exec.clone(),
+            long_argument: ext_cfg.long_argument,
+            exec_script: ext_cfg.exec_script.clone(),
+            known_modes: vec![],
+        });
+    }
+    log::debug!("Loaded {} config commands", config.na_commands.len());
 
     let _app_data = app::AppData::default();
 

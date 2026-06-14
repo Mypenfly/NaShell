@@ -378,6 +378,7 @@ pub fn run(
                         registry: Some(registry.clone()),
                         shell_manager: Some(shell_manager.clone()),
                         plugin_manager: plugin_manager.clone(),
+                        config_dir: config.config_dir.clone(),
                     };
 
                     match executor::dispatch(cmd, &mut ctx, &mut stdout) {

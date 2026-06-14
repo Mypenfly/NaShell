@@ -160,6 +160,7 @@ fn execute_single_direct(
                 registry: Some(registry.clone()),
                 shell_manager: shell_manager.cloned(),
                 plugin_manager: None,
+                config_dir: None,
             };
             let mut out_buf = Vec::new();
             match crate::executor::dispatch(raw_cmd, &mut ctx, &mut out_buf) {
@@ -223,6 +224,7 @@ fn execute_pipeline_captured(
             registry: Some(registry.clone()),
             shell_manager: shell_manager.cloned(),
             plugin_manager: None,
+            config_dir: None,
         };
 
         let mut out_buf = Vec::new();

@@ -561,7 +561,7 @@
 
 ---
 
-## Phase 8: 外部配置命令
+## Phase 8: 外部配置命令 ✅ 已完成
 
 **目标**：用户在 `config.kdl` 中配置的 NaCommand 可正常调用。
 
@@ -604,6 +604,24 @@
 3. **exec_script 临时文件**：创建在 `/tmp/nashell/` 下，文件名含随机串。执行后无论成功与否均删除。路径处理注意与配置文件所在目录的相对路径解析。
 4. **外部命令支持 `known_modes`**：若外部命令定义了 `known_modes`，`build_nacommand` 会做查表提取 mode。对于大多外部命令此字段为空，mode 保持为 arg 透传。
 5. **配置文件加载**：当前 `NashellConfig.na_commands` 已解析 KDL 的 `NaCommands` 块为 `HashMap<String, ExternalCmdConfig>`，只需在 `main.rs` 中将其转换为 `Vec<CmdMeta>` 写入 registry。
+
+### 验证
+- [x] 在 config.kdl 中配置 `websearch exec="python3 ./web_search.py" long_argument=false`
+- [x] 调用 `!@WebSearch: rust async programming -n 5` → 正确执行并输出搜索结果
+- [x] `!@WebSearch:Help` → 透传 `--help` 输出
+- [x] 配置带 exec_script 的命令，临时脚本在 `/tmp/nashell/` 生成并自动清理
+- [x] `exec` 字段支持空格分隔的程序名+参数（如 `"python3 ./script.py"`）
+- [x] 306 个单元测试全部通过
+
+### 额外完成项
+
+- **`!@NaCmds:` 内置命令**（Phase 8 追加）：列出所有已注册 NaCommand 的 System 级命令
+  - 默认模式：表格列出命令名、级别、来源（Builtin/Config/Plugin）
+  - Detail 模式：额外显示每条命令的帮助摘要（内置直接获取、外部执行 `--help`、插件通过 call/response 协议）
+  - `-j/--json` 选项：JSON 格式输出，ANSI 码自动清洗
+  - `PluginManager::get_command_help()`：新增插件帮助获取方法，读取 stdout 后归还 handle
+- **`build_nacommand` 加强**：`"help"` 成为所有命令的保留模式（含 `known_modes` 为空的外部/插件命令）
+- **`config_dir` 路径解析**：`NashellConfig` 新增 `config_dir` 字段，`resolve_exec_parts` 按空格拆分 exec 并仅对 `./`/`../` 开头的路径做相对解析
 
 ---
 

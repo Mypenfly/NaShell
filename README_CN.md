@@ -73,6 +73,7 @@ NaShell 进程
 | `!@Open:` | Normal | 打开文件或目录。文件模式含语法高亮，目录模式显示结构树。 |
 | `!!@Bash:` | System | 通过 `bash -c` 执行。解析优先级最高，跳过其他所有规则。 |
 | `!!@Shell:` | System | 管理 Shell 线程。模式：默认、Watch、Destroy、Switch。 |
+| `!@NaCmds:` | System | 列出所有已注册命令。模式：默认表格、Detail（含帮助）、`-j/--json`。 |
 
 ## 插件系统
 
@@ -209,14 +210,16 @@ src/
 │   ├── shell_exec.rs    # exec_captured/exec_shell_direct/exec_bash/exec_cd
 │   └── async_exec.rs    # 异步执行: 后台完整 parse→dispatch
 ├── nacommand/
-│   ├── mod.rs           # NaCommand 执行: 内置/插件分派
+│   ├── mod.rs           # NaCommand 执行: 内置/配置/插件分派
 │   ├── cmd.rs           # NaCommand/NaLevel 结构体
 │   ├── registry.rs      # 命令注册表、查表、帮助
+│   ├── external.rs      # 外部配置命令执行 (Phase 8)
 │   └── builtin/
 │       ├── write.rs     # Write 命令
 │       ├── open.rs      # Open 命令（语法高亮）
 │       ├── bash.rs      # Bash 命令 (!!@Bash:)
-│       └── shell_cmd.rs # Shell 管理 (!!@Shell:)
+│       ├── shell_cmd.rs # Shell 管理 (!!@Shell:)
+│       └── na_cmds.rs   # 命令注册表查询 (!@NaCmds:)
 ├── shell/
 │   ├── actor.rs         # Shell 结构体
 │   ├── cmd.rs           # ShellCmd 枚举
@@ -261,7 +264,7 @@ src/
 ## 开发
 
 ```bash
-# 运行全部测试（284 个）
+# 运行全部测试（306 个）
 cargo test
 
 # 代码检查

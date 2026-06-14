@@ -124,6 +124,7 @@ fn execute_pipeline(
             registry: Some(registry.clone()),
             shell_manager: Some(manager_clone.clone()),
             plugin_manager: plugin_manager.clone(),
+            config_dir: None,
         };
 
         let mut out_buf = Vec::new();
