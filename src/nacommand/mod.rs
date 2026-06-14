@@ -23,6 +23,8 @@ use crate::nacommand::registry::CommandRegistry;
 pub fn execute_nacommand(
     cmd: &NaCommand,
     _pre_out: Option<String>,
+    // TODO: 管道中段 NaCommand 应使用 pre_out 作为输入内容
+    //       当前 Write/Open 不需要此功能，Phase 6+ 的 Bash/Shell 命令需要
     registry: &CommandRegistry,
 ) -> Result<String, NashellError> {
     let lower_cmd = cmd.cmd.to_lowercase();
@@ -59,6 +61,27 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    fn strip_ansi(s: &str) -> String {
+        let mut result = String::with_capacity(s.len());
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' && chars.peek() == Some(&'[') {
+                chars.next();
+                while let Some(&nc) = chars.peek() {
+                    if nc.is_ascii_digit() || nc == ';' {
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                chars.next();
+                continue;
+            }
+            result.push(c);
+        }
+        result
+    }
 
     fn setup_temp_dir() -> std::path::PathBuf {
         let id = COUNTER.fetch_add(1, Ordering::SeqCst);
@@ -128,7 +151,7 @@ mod tests {
             long_argument: None,
         };
 
-        let result = execute_nacommand(&cmd, None, &registry).unwrap();
+        let result = strip_ansi(&execute_nacommand(&cmd, None, &registry).unwrap());
         assert!(result.contains("1  line 1"));
         assert!(result.contains("2  line 2"));
     }

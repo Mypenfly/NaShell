@@ -23,9 +23,6 @@ pub fn execute_write(cmd: &NaCommand) -> Result<String, NashellError> {
     })?;
 
     let file_path = PathBuf::from(path_str);
-    let abs_path = file_path
-        .canonicalize()
-        .unwrap_or_else(|_| file_path.clone());
 
     let parent = file_path.parent();
     match parent {
@@ -47,16 +44,17 @@ pub fn execute_write(cmd: &NaCommand) -> Result<String, NashellError> {
         source: e,
     })?;
 
-    let abs_path_display = if abs_path.exists() {
-        abs_path.display().to_string()
-    } else {
-        // canonicalize failed, use joined path
-        std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(&file_path)
-            .display()
-            .to_string()
-    };
+    let abs_path_display = std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join(&file_path)
+        .canonicalize()
+        .unwrap_or_else(|_| {
+            std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(&file_path)
+        })
+        .display()
+        .to_string();
 
     Ok(format!(
         "write to {} ({} bytes)",

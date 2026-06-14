@@ -328,7 +328,7 @@
 
 ---
 
-## Phase 5: NaCommand 执行引擎
+## Phase 5: NaCommand 执行引擎 ✅ 已完成
 
 **目标**：内置 NaCommand（Write、Open）及 Help 模式可正常工作。
 
@@ -345,46 +345,52 @@
 
 ### 任务
 
-1. **创建 `src/nacommand/registry.rs`**
+1. ✅ **创建 `src/nacommand/registry.rs`**
    - `CommandRegistry` 结构体：管理所有注册的命令
    - `register_builtin()`: 注册 Write、Open 等内置命令
    - `lookup(cmd_name: &str) -> Result<&CmdMeta, NashellError>`: 查表（内置 → 配置 → 插件）
    - `get_help(cmd_name: &str, mode: Option<&str>) -> Result<String, NashellError>`: 获取帮助信息
 
-2. **创建 `src/nacommand/builtin/write.rs`**
+2. ✅ **创建 `src/nacommand/builtin/write.rs`**
    - 实现 Write 命令逻辑（见 `nashell_dev.md` Write 章节）
    - 检查父目录存在性
    - long_argument 为 None 时创建空文件/清空文件
    - 返回格式：`write to {abs_path} ({bytes} bytes)`
 
-3. **创建 `src/nacommand/builtin/open.rs`**
+3. ✅ **创建 `src/nacommand/builtin/open.rs`**
    - 实现 Open 命令逻辑（见 `nashell_dev.md` Open 章节）
    - 路径为目录：输出目录结构树
    - 路径为文件：按行号输出内容，支持 `--limit`/`--start`/`--end`
    - 目录时传入文件选项参数应报错
-   - 考虑语法高亮（使用 `syntect`）
+   - 语法高亮已实现（使用 `syntect`，主题 `base16-ocean.dark`）
 
-4. **创建 `src/nacommand/builtin/mod.rs`**
+4. ✅ **创建 `src/nacommand/builtin/mod.rs`**
    - 注册 Write、Open 到 CommandRegistry
 
-5. **创建 `src/nacommand/mod.rs`**
+5. ✅ **创建 `src/nacommand/mod.rs`**
    - `execute_nacommand(cmd: &NaCommand, pre_out: Option<String>, registry: &CommandRegistry) -> Result<String, NashellError>`:
      - 查表找到命令处理器
      - 构建完整 NaCommand（合并 long_argument 和 pre_out）
      - 调用对应 handler
 
-6. **更新 `src/executor/mod.rs`**
+6. ✅ **更新 `src/executor/mod.rs`**
    - `dispatch()` 完善 NaCommandNormal / NaCommandSystem 分支
    - 调用 `nacommand::execute_nacommand()`
 
 ### 验证
-- `!@Write:./test.txt @/` + 内容 → 文件创建成功
-- `!@Write:./test.txt @/` + 多行内容 → 内容正确写入，缩进格式保留
-- `!@Write:./nonexistent/file.txt @/` + 内容 → 报错（父目录不存在）
-- `!@Open:./src` → 显示目录结构
-- `!@Open:./src/main.rs -l 50` → 显示前 50 行
-- `!@Write:Help` → 显示 Write 命令帮助
-- `!@Open:Help` → 显示 Open 命令帮助
+- [x] `!@Write:./test.txt @/` + 内容 → 文件创建成功
+- [x] `!@Write:./test.txt @/` + 多行内容 → 内容正确写入，缩进格式保留
+- [x] `!@Write:./nonexistent/file.txt @/` + 内容 → 报错（父目录不存在）
+- [x] `!@Open:./src` → 显示目录结构（支持 `-l` 控制递归深度，默认 3）
+- [x] `!@Open:./src/main.rs -l 50` → 显示前 50 行（带语法高亮）
+- [x] `!@Write:Help` → 显示 Write 命令帮助（带 ANSI 颜色美化）
+- [x] `!@Open:Help` → 显示 Open 命令帮助（带 ANSI 颜色美化）
+
+附加实现（超出原始 Phase 5 范围）：
+- Open 命令语法高亮（`syntect`，按文件扩展名自动选择语言）
+- Open 目录递归深度控制（`--limit/-l` 对目录控制深度，默认 3）
+- Help 输出 ANSI 颜色美化（命令名亮青加粗、标题亮蓝、代码绿、警告亮黄）
+- `dispatch_direct` 对 NaCommand 的错误信息改进
 
 ---
 
@@ -404,6 +410,18 @@
 5. **Help 模式统一支持**：所有命令在 `known_modes` 中包含 `"help"` 即自动支持 `!@Cmd:Help` 语法。
 
 6. **Phase 6 的 Shell 命令**：需要在 `CmdMeta.known_modes` 中注册 `["watch", "destroy", "switch"]`，`build_nacommand` 将自动提取。
+
+7. **`pre_out` 管道传递未使用**：`execute_nacommand` 接受 `pre_out: Option<String>` 参数但当前未消费（Phase 5 的 Write/Open 不需要）。Phase 6 的 Bash 命令和管道中段 NaCommand 需要正确使用此参数。代码中已添加 TODO 标记。
+
+8. **Open 命令 `--limit/-l` 重载行为**：
+   - 文件模式：`-l` 控制显示行数（与 spec 一致）
+   - 目录模式：`-l` 控制递归深度（默认 3，新增行为）
+   - `-s`/`-e` 对目录报错（与 spec 一致），`-l` 对目录合法
+   - `has_file_only_options` 仅检查 `-s`/`-e`，不再检查 `-l`
+
+9. **语法高亮使用 `syntect`**：依赖 `default-fancy` features，`SyntaxSet`/`ThemeSet` 通过 `OnceLock` 延迟加载并全局复用。测试中 `strip_ansi` 辅助函数用于移除 ANSI 码后进行断言。
+
+10. **`dispatch_direct` 错误信息已改进**：NaCommand 进入直连模式时返回 `NashellError::Execute`（而非 `CommandNotFound`），便于排查 `should_use_direct` 判定逻辑问题。
 
 ---
 

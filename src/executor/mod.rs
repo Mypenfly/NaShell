@@ -222,10 +222,16 @@ pub fn dispatch_direct(cmd: &RawCmd, shell_type: &str) -> Result<(), NashellErro
             shell_exec::exec_shell_direct(&cmd.cmd, &cmd.args, shell_type)?;
             Ok(())
         }
-        // NaCommand 在直连模式下回退——内置命令是 Rust 代码、外部命令待 Phase 9 支持
+        // NaCommand 不支持直连模式：内置命令通过 captured 路径执行（有格式化输出前缀），
+        // 外部/插件命令同理。若执行到此分支，说明 should_use_direct 判定逻辑有误。
         CmdType::NaCommandNormal | CmdType::NaCommandSystem => {
-            Err(NashellError::CommandNotFound {
-                name: cmd.cmd.clone(),
+            Err(NashellError::Execute {
+                command: cmd.cmd.clone(),
+                exit_code: None,
+                stderr: format!(
+                    "NaCommand '{}' 不支持直连终端模式，请通过 captured 路径执行",
+                    cmd.cmd
+                ),
             })
         }
     }

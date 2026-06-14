@@ -1,9 +1,61 @@
-use crate::constants::{DEFAULT_OPEN_LIMIT, MAX_OPEN_LIMIT};
+use crate::constants::{DEFAULT_OPEN_DIR_DEPTH, DEFAULT_OPEN_LIMIT, MAX_OPEN_LIMIT};
 use crate::error::NashellError;
 use crate::nacommand::cmd::NaCommand;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
+use std::sync::OnceLock;
+
+use syntect::easy::HighlightLines;
+use syntect::highlighting::ThemeSet;
+use syntect::parsing::SyntaxSet;
+use syntect::util::as_24_bit_terminal_escaped;
+
+fn syntax_set() -> &'static SyntaxSet {
+    static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
+    SYNTAX_SET.get_or_init(SyntaxSet::load_defaults_newlines)
+}
+
+fn theme() -> &'static syntect::highlighting::Theme {
+    static THEME: OnceLock<syntect::highlighting::Theme> = OnceLock::new();
+    THEME.get_or_init(|| {
+        let ts = ThemeSet::load_defaults();
+        ts.themes["base16-ocean.dark"].clone()
+    })
+}
+
+/// 高亮单行内容。
+///
+/// 根据文件扩展名选择语法，返回带 ANSI 转义码的彩色行。
+/// 高亮器 `h` 必须按行顺序调用以维护内部解析状态。
+///
+/// # 参数
+/// - `h`: 行高亮器（可复用，调用方管理其生命周期）
+/// - `ss`: 语法定义集
+/// - `line`: 原始行文本（不含换行符）
+///
+/// # 返回
+/// ANSI 高亮后的行文本
+fn highlight_line(
+    h: &mut HighlightLines,
+    ss: &SyntaxSet,
+    line: &str,
+) -> String {
+    let ranges = h.highlight_line(line, ss).unwrap_or_default();
+    as_24_bit_terminal_escaped(&ranges[..], false)
+}
+
+/// 根据文件扩展名创建高亮器。
+///
+/// 若找不到对应的语法定义，回退到纯文本。
+fn new_highlighter(extension: &str) -> (HighlightLines<'static>, &'static SyntaxSet) {
+    let ss = syntax_set();
+    let syntax = ss
+        .find_syntax_by_extension(extension)
+        .unwrap_or_else(|| ss.find_syntax_plain_text());
+    let h = HighlightLines::new(syntax, theme());
+    (h, ss)
+}
 
 /// 解析 Open 命令的可选参数。
 ///
@@ -93,30 +145,74 @@ fn parse_open_options(args: &[String]) -> Result<(usize, usize, Option<usize>), 
     Ok((limit, start, end))
 }
 
-/// 检查 args 中除 path (index 0) 外是否包含文件选项。
-fn has_file_options(args: &[String]) -> bool {
-    if args.len() <= 1 {
-        return false;
-    }
-    for i in 1..args.len() {
+/// 从 args 中提取目录递归深度（仅 --limit/-l）。
+///
+/// 默认深度为 DEFAULT_OPEN_DIR_DEPTH（3）。
+fn parse_dir_depth(args: &[String]) -> Result<usize, NashellError> {
+    let mut depth = DEFAULT_OPEN_DIR_DEPTH;
+    let mut i = 1;
+    while i < args.len() {
         let arg = args[i].as_str();
-        if arg == "-l" || arg == "--limit" || arg == "-s" || arg == "--start" || arg == "-e" || arg == "--end" {
-            return true;
+        match arg {
+            "-l" | "--limit" => {
+                if i + 1 >= args.len() {
+                    return Err(NashellError::Execute {
+                        command: "open".to_string(),
+                        exit_code: None,
+                        stderr: format!("{} 缺少值", arg),
+                    });
+                }
+                depth = args[i + 1].parse::<usize>().map_err(|_| {
+                    NashellError::Execute {
+                        command: "open".to_string(),
+                        exit_code: None,
+                        stderr: format!("无效的 {} 值: {}", arg, args[i + 1]),
+                    }
+                })?;
+                i += 2;
+            }
+            _ => {
+                i += 1;
+            }
         }
     }
-    false
+    Ok(depth)
+}
+
+/// 检查 args 中除 path (index 0) 外是否包含仅文件可用的选项（-s/-e）。
+///
+/// --limit/-l 已同时支持文件和目录（文件=行数，目录=深度），不在检查范围内。
+fn has_file_only_options(args: &[String]) -> bool {
+    args.iter().skip(1).any(|a| {
+        matches!(
+            a.as_str(),
+            "-s" | "--start" | "-e" | "--end"
+        )
+    })
 }
 
 /// 生成目录结构树。
 ///
 /// 递归遍历目录，返回类似 tree 命令的输出。
-fn generate_dir_tree(path: &PathBuf, prefix: &str, is_last: bool) -> String {
+/// `depth` 为当前递归深度（首次调用传 1），`max_depth` 为上限。
+fn generate_dir_tree(
+    path: &PathBuf,
+    prefix: &str,
+    is_last: bool,
+    depth: usize,
+    max_depth: usize,
+) -> String {
     let mut output = String::new();
     let name = path
         .file_name()
         .unwrap_or_default()
         .to_string_lossy()
         .to_string();
+
+    if depth > max_depth {
+        return output;
+    }
+
     let connector = if is_last { "└── " } else { "├── " };
 
     if prefix.is_empty() {
@@ -145,7 +241,20 @@ fn generate_dir_tree(path: &PathBuf, prefix: &str, is_last: bool) -> String {
 
         let child_name = entry.file_name().to_string_lossy().to_string();
         if entry.path().is_dir() {
-            output.push_str(&generate_dir_tree(&child_path, &child_prefix, is_child_last));
+            if depth < max_depth {
+                // 可递归进入子目录
+                output.push_str(&generate_dir_tree(
+                    &child_path,
+                    &child_prefix,
+                    is_child_last,
+                    depth + 1,
+                    max_depth,
+                ));
+            } else {
+                // 深度已达上限，仅打印目录名，不再展开
+                let connector = if is_child_last { "└── " } else { "├── " };
+                output.push_str(&format!("{}{}{}\n", child_prefix, connector, child_name));
+            }
         } else {
             let connector = if is_child_last { "└── " } else { "├── " };
             output.push_str(&format!("{}{}{}\n", child_prefix, connector, child_name));
@@ -155,13 +264,19 @@ fn generate_dir_tree(path: &PathBuf, prefix: &str, is_last: bool) -> String {
     output
 }
 
-/// 读取文件内容并以带行号格式返回。
+/// 读取文件内容并以带行号、语法高亮的格式返回。
 fn read_file_with_options(
     path: &PathBuf,
     limit: usize,
     start: usize,
     end: Option<usize>,
 ) -> Result<String, NashellError> {
+    let extension = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+    let (mut h, ss) = new_highlighter(extension);
+
     let file = fs::File::open(path).map_err(|e| NashellError::Io {
         path: Some(path.display().to_string()),
         source: e,
@@ -178,9 +293,17 @@ fn read_file_with_options(
         });
     }
 
+    let width = max_line.to_string().len();
+
     for (idx, line) in reader.lines().enumerate() {
-        let line_num = idx + 1; // 1-indexed
+        let line_num = idx + 1;
         if line_num < start {
+            // 仍然推进高亮器状态以保持上下文正确
+            let line_content = line.map_err(|e| NashellError::Io {
+                path: Some(path.display().to_string()),
+                source: e,
+            })?;
+            let _ = h.highlight_line(&line_content, ss);
             continue;
         }
         if line_num > max_line {
@@ -190,8 +313,13 @@ fn read_file_with_options(
             path: Some(path.display().to_string()),
             source: e,
         })?;
-        let width = max_line.to_string().len();
-        output.push_str(&format!("{:>width$}  {}\n", line_num, line_content, width = width));
+        let highlighted = highlight_line(&mut h, ss, &line_content);
+        output.push_str(&format!(
+            "{:>width$}  {}\n",
+            line_num,
+            highlighted,
+            width = width
+        ));
     }
 
     Ok(output)
@@ -227,14 +355,15 @@ pub fn execute_open(cmd: &NaCommand) -> Result<String, NashellError> {
     }
 
     if file_path.is_dir() {
-        if has_file_options(&cmd.args) {
+        if has_file_only_options(&cmd.args) {
             return Err(NashellError::Execute {
                 command: "open".to_string(),
                 exit_code: None,
-                stderr: "目录模式下不支持 --limit/--start/--end 参数".to_string(),
+                stderr: "目录模式下不支持 --start/--end 参数，--limit/-l 控制递归深度".to_string(),
             });
         }
-        let tree = generate_dir_tree(&file_path, "", true);
+        let max_depth = parse_dir_depth(&cmd.args)?;
+        let tree = generate_dir_tree(&file_path, "", true, 1, max_depth);
         Ok(tree)
     } else {
         let (limit, start, end) = parse_open_options(&cmd.args)?;
@@ -279,6 +408,28 @@ mod tests {
 
     // --- File tests ---
 
+    /// 移除 ANSI 转义码，用于测试断言（语法高亮会产生 ANSI 码）。
+    fn strip_ansi(s: &str) -> String {
+        let mut result = String::with_capacity(s.len());
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' && chars.peek() == Some(&'[') {
+                chars.next();
+                while let Some(&nc) = chars.peek() {
+                    if nc.is_ascii_digit() || nc == ';' {
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                chars.next();
+                continue;
+            }
+            result.push(c);
+        }
+        result
+    }
+
     #[test]
     fn test_open_file_default_limit() {
         let dir = setup_temp_dir();
@@ -292,7 +443,7 @@ mod tests {
             long_argument: None,
         };
 
-        let result = execute_open(&cmd).unwrap();
+        let result = strip_ansi(&execute_open(&cmd).unwrap());
         assert!(result.contains("1  line 1"));
         assert!(result.contains("10  line 10"));
         assert!(!result.contains("11  "));
@@ -315,7 +466,7 @@ mod tests {
             long_argument: None,
         };
 
-        let result = execute_open(&cmd).unwrap();
+        let result = strip_ansi(&execute_open(&cmd).unwrap());
         assert!(result.contains("1  line 1"));
         assert!(result.contains("3  line 3"));
         assert!(!result.contains("4  line 4"));
@@ -338,7 +489,7 @@ mod tests {
             long_argument: None,
         };
 
-        let result = execute_open(&cmd).unwrap();
+        let result = strip_ansi(&execute_open(&cmd).unwrap());
         assert!(!result.contains("4  line 4"));
         assert!(result.contains("5  line 5"));
     }
@@ -360,7 +511,7 @@ mod tests {
             long_argument: None,
         };
 
-        let result = execute_open(&cmd).unwrap();
+        let result = strip_ansi(&execute_open(&cmd).unwrap());
         assert!(result.contains("1  line 1"));
         assert!(result.contains("3  line 3"));
         assert!(!result.contains("4  line 4"));
@@ -383,7 +534,7 @@ mod tests {
             long_argument: None,
         };
 
-        let result = execute_open(&cmd).unwrap();
+        let result = strip_ansi(&execute_open(&cmd).unwrap());
         assert!(result.contains("1  line 1"));
         assert!(result.contains("2  line 2"));
         assert!(!result.contains("3  line 3"));
@@ -442,24 +593,39 @@ mod tests {
     }
 
     #[test]
-    fn test_open_directory_with_file_options_errors() {
+    fn test_open_directory_with_depth_limit() {
         let dir = setup_temp_dir();
         let test_dir = create_test_dir(&dir, "mydir");
 
+        // 默认深度为 3，子目录内容应可见
         let cmd = NaCommand {
+            level: NaLevel::Normal,
+            cmd: "open".to_string(),
+            mode: None,
+            args: vec![test_dir.to_string_lossy().to_string()],
+            long_argument: None,
+        };
+
+        let result = execute_open(&cmd).unwrap();
+        assert!(result.contains("subdir"));
+        assert!(result.contains("b.txt"));
+
+        // 深度 1：只显示根目录内容，不展开子目录
+        let cmd_shallow = NaCommand {
             level: NaLevel::Normal,
             cmd: "open".to_string(),
             mode: None,
             args: vec![
                 test_dir.to_string_lossy().to_string(),
                 "-l".to_string(),
-                "10".to_string(),
+                "1".to_string(),
             ],
             long_argument: None,
         };
 
-        let result = execute_open(&cmd);
-        assert!(result.is_err());
+        let result_shallow = execute_open(&cmd_shallow).unwrap();
+        assert!(result_shallow.contains("a.txt"));
+        assert!(!result_shallow.contains("b.txt"));
     }
 
     // --- Invalid options ---

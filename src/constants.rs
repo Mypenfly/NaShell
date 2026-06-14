@@ -4,6 +4,9 @@ pub const DEFAULT_OPEN_LIMIT: usize = 500;
 /// 文件读取最大行数
 pub const MAX_OPEN_LIMIT: usize = 2000;
 
+/// 目录树默认递归深度
+pub const DEFAULT_OPEN_DIR_DEPTH: usize = 3;
+
 /// Shell 默认超时（秒）
 pub const DEFAULT_SHELL_TIMEOUT_SECS: u64 = 120;
 
@@ -37,6 +40,7 @@ mod tests {
     fn test_all_constants() {
         assert_eq!(super::DEFAULT_OPEN_LIMIT, 500);
         assert_eq!(super::MAX_OPEN_LIMIT, 2000);
+        assert_eq!(super::DEFAULT_OPEN_DIR_DEPTH, 3);
         assert_eq!(super::DEFAULT_SHELL_TIMEOUT_SECS, 120);
         assert_eq!(super::PLUGIN_TIMEOUT_SECS, 30);
         assert_eq!(super::TOEXEC_MAX_DEPTH, 3);

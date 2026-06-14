@@ -10,6 +10,36 @@ pub struct CommandRegistry {
     pub builtin_cmds: Vec<CmdMeta>,
 }
 
+/// ANSI 颜色样式常量，用于帮助文本格式化。
+mod style {
+    pub const BOLD: &str = "\x1b[1m";
+    pub const BRIGHT_CYAN: &str = "\x1b[96m";
+    pub const BRIGHT_BLUE: &str = "\x1b[94m";
+    pub const GREEN: &str = "\x1b[32m";
+    pub const BRIGHT_YELLOW: &str = "\x1b[93m";
+    pub const RESET: &str = "\x1b[0m";
+}
+
+/// 为文本包裹加亮青色（命令名）。
+fn style_cmd_name(text: &str) -> String {
+    format!("{}{}{}{}", style::BOLD, style::BRIGHT_CYAN, text, style::RESET)
+}
+
+/// 为文本包裹亮蓝色（段落标题）。
+fn style_section(title: &str) -> String {
+    format!("{}{}{}", style::BRIGHT_BLUE, title, style::RESET)
+}
+
+/// 为代码示例包裹绿色。
+fn style_code(code: &str) -> String {
+    format!("{}{}{}", style::GREEN, code, style::RESET)
+}
+
+/// 为注意事项包裹亮黄色。
+fn style_note(text: &str) -> String {
+    format!("{}{}{}", style::BRIGHT_YELLOW, text, style::RESET)
+}
+
 impl CommandRegistry {
     /// 创建空的命令注册表。
     pub fn new() -> Self {
@@ -68,23 +98,51 @@ impl CommandRegistry {
     pub fn get_help(&self, cmd_name: &str, _mode: Option<&str>) -> Result<String, NashellError> {
         let lower_name = cmd_name.to_lowercase();
 
-        let builtin_helps: std::collections::HashMap<&str, &str> = {
+        let builtin_helps: std::collections::HashMap<String, String> = {
             let mut m = std::collections::HashMap::new();
             m.insert(
-                "write",
-                "Write\n  将内容写入文件。\n\n  参数:\n    path    目标文件路径（必须，命令名后的第一个参数）\n    content 要写入的内容，来自 long_argument（非必须）\n\n  使用示例:\n    !@Write:./example.py @/\n      > x = int(input())\n      > print(x * 18)\n\n  注意: long_argument 为 None 时创建空文件或清空既有文件。",
+                "write".to_string(),
+                format!(
+                    "{}\n  将内容写入文件。\n\n  {}  \
+                     path    目标文件路径（必须，命令名后的第一个参数）\n    \
+                     content 要写入的内容，来自 long_argument（非必须）\n\n  {}  \
+                     \n    {}\n      {}  \
+                     \n\n  {} long_argument 为 None 时创建空文件或清空既有文件。",
+                    style_cmd_name("Write"),
+                    style_section("参数:"),
+                    style_section("使用示例:"),
+                    style_code("!@Write:./example.py @/"),
+                    style_code("> x = int(input())\n      > print(x * 18)"),
+                    style_note("注意:")
+                ),
             );
             m.insert(
-                "open",
-                "Open\n  打开文件或文件夹。\n\n  参数:\n    path           目标路径（必须）\n    --limit/-l     限制行数（默认 500，仅文件有效）\n    --start/-s     起始行（默认 1，仅文件有效）\n    --end/-e       结束行（仅文件有效）\n\n  使用示例:\n    !@Open:./src           显示目录结构树\n    !@Open:./test.py -l 50 显示文件前 50 行（带行号）\n\n  注意: 目标为目录时不可传入 --limit/--start/--end，否则报错。",
+                "open".to_string(),
+                format!(
+                    "{}\n  打开文件或文件夹。\n\n  {}  \
+                     path           目标路径（必须）\n    \
+                     --limit/-l     限制行数（文件，默认 500）/ 递归深度（目录，默认 3）\n    \
+                     --start/-s     起始行（默认 1，仅文件有效）\n    \
+                     --end/-e       结束行（仅文件有效）\n\n  {}  \
+                     \n    {}\n    {}\n\n  {} \
+                     目标为目录时不可传入 --start/--end，否则报错。\n  \
+                     {} 文件内容支持语法高亮。",
+                    style_cmd_name("Open"),
+                    style_section("参数:"),
+                    style_section("使用示例:"),
+                    style_code("!@Open:./src           显示目录结构树（深度 3）"),
+                    style_code("!@Open:./test.py -l 50 显示文件前 50 行（带行号+语法高亮）"),
+                    style_note("注意:"),
+                    style_note("注意:")
+                ),
             );
             m
         };
 
         for builtin_help in &self.builtin_cmds {
             if builtin_help.name.to_lowercase() == lower_name {
-                if let Some(help_text) = builtin_helps.get(lower_name.as_str()) {
-                    return Ok(help_text.to_string());
+                if let Some(help_text) = builtin_helps.get(&lower_name) {
+                    return Ok(help_text.clone());
                 }
                 break;
             }
