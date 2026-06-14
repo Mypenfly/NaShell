@@ -693,6 +693,14 @@ pub const DEFAULT_PLUGINS_DIR: &str = ".config/nashell/plugins";
 
 8. **配置文件缺失处理**：若 `~/.config/nashell/config.kdl` 不存在，使用内置默认值启动，不报错。若存在但解析失败，报告解析错误但继续使用默认值启动。
 
-9. **大小写匹配**：所有 NaCommand 命令名和模式名在匹配时统一转小写。用户输入 `Open`、`OPEN`、`open` 均匹配为 `open`。
+9. **Mode 提取规则——查表法**：NaCommand 本质上是"调用格式特殊的 CLI 工具"。mode 的判定标准是**有表查表**：
+   - 每条命令在 `CmdMeta.known_modes` 中声明自己的已知模式列表（小写）。
+   - `build_nacommand` 将 `args[0]` 与该命令的 `known_modes` 做大小写不敏感的匹配：
+     - 匹配成功 → 提取为 `NaCommand.mode`，从 `args` 中移除。
+     - 匹配失败 → 保持为普通 `arg`。
+   - **外部配置命令和插件命令**：`known_modes` 为空，不做查表，args 原样透传。这些命令在各自的程序/插件内部自行查表处理 mode。
+   - 例如：Write 的 `known_modes = ["help"]`，`!@Write:Help` → mode="help"（提取）；`!@Write:./test.txt` → mode=None, args=["./test.txt"]（不提取）。
 
-10. **exec_script 临时文件**：临时脚本文件创建在 `/tmp/nashell/` 下，文件名包含随机串避免冲突。执行结束后无论成功与否都删除。
+10. **大小写匹配**：所有 NaCommand 命令名和模式名在匹配时统一转小写。用户输入 `Open`、`OPEN`、`open` 均匹配为 `open`。
+
+11. **exec_script 临时文件**：临时脚本文件创建在 `/tmp/nashell/` 下，文件名包含随机串避免冲突。执行结束后无论成功与否都删除。

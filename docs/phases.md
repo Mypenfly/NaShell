@@ -388,6 +388,25 @@
 
 ---
 
+### Phase 5 复盘要点（Phase 6 开始前必须注意）
+
+1. **Mode 提取采用查表法**：NaCommand 本质上是"调用格式特殊的 CLI 工具"。mode 的判定不是依赖启发式规则（如检查是否以 `-` 或 `.` 开头），而是**有表查表**：
+   - 每条命令在 `CmdMeta.known_modes` 中声明已知模式（小写）。
+   - `build_nacommand` 将 `args[0]` 与 `known_modes` 做大小写不敏感匹配：命中 → 提取为 `NaCommand.mode`；未命中 → 保持为 `arg`。
+   - **外部配置命令和插件命令** `known_modes` 为空 → 不做查表，args 原样透传，由其内部自行处理 mode。
+
+2. **`CmdMeta` 新增 `known_modes` 字段**：`Vec<String>` 类型。注册内置命令时必须填写。Phase 8-9 实现外部/插件命令时无需填写此字段。
+
+3. **`build_nacommand` 依赖 registry**：函数签名增加了 `registry: &CommandRegistry` 参数，用于查询命令的 `known_modes`。测试构造时需提供含正确 `known_modes` 的 registry。
+
+4. **`execute_nacommand` 只检查 `cmd.mode`**：不再 fallback 检查 `cmd.args[0]`。因为 mode 提取已在 `build_nacommand` 阶段通过查表完成。
+
+5. **Help 模式统一支持**：所有命令在 `known_modes` 中包含 `"help"` 即自动支持 `!@Cmd:Help` 语法。
+
+6. **Phase 6 的 Shell 命令**：需要在 `CmdMeta.known_modes` 中注册 `["watch", "destroy", "switch"]`，`build_nacommand` 将自动提取。
+
+---
+
 ## Phase 6: System 级命令
 
 **目标**：`!!@Bash:` 和 `!!@Shell:` 命令完整可用，`@/Async` 异步执行可用。

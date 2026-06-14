@@ -8,7 +8,8 @@ mod parser;
 mod repl;
 mod shell;
 
-use app::AppData;
+use app::{AppData, CmdMeta, Level};
+use nacommand::registry::CommandRegistry;
 
 fn main() {
     env_logger::init();
@@ -45,6 +46,25 @@ fn main() {
         }
     };
 
+    // 构建内置命令注册表
+    let mut registry = CommandRegistry::new();
+    registry.register_builtin(CmdMeta {
+        level: Level::Normal,
+        name: "write".to_string(),
+        exec: "n_write".to_string(),
+        long_argument: true,
+        exec_script: None,
+        known_modes: vec!["help".to_string()],
+    });
+    registry.register_builtin(CmdMeta {
+        level: Level::Normal,
+        name: "open".to_string(),
+        exec: "n_open".to_string(),
+        long_argument: false,
+        exec_script: None,
+        known_modes: vec!["help".to_string()],
+    });
+
     let _app_data = AppData::default();
 
     // 检测 shell 类型
@@ -59,7 +79,7 @@ fn main() {
     let home_dir = dirs::home_dir();
 
     // 进入 REPL 循环
-    repl::run(home_dir, &config, &shell_type);
+    repl::run(home_dir, &config, &shell_type, registry);
 
     log::info!("NaShell exiting.");
 }

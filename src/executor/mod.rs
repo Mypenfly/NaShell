@@ -2,6 +2,19 @@ pub mod shell_exec;
 
 use crate::error::NashellError;
 use crate::parser::syntax::{CmdType, RawCmd};
+use crate::nacommand::cmd::{NaCommand, NaLevel};
+use crate::nacommand::registry::CommandRegistry;
+
+/// 命令输出的类型标识。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum OutputType {
+    /// 普通 shell 命令
+    Shell,
+    /// Bash 命令 (!!@Bash:)
+    Bash,
+    /// NaCommand (内置/外部/插件)
+    NaCommand,
+}
 
 /// 执行上下文，包含执行所需的依赖。
 pub struct ExecContext {
@@ -13,6 +26,10 @@ pub struct ExecContext {
     pub timeout_secs: u64,
     /// 安全拦截模式列表
     pub deny_patterns: Vec<String>,
+    /// @/ 之后的长参数内容
+    pub long_argument: Option<String>,
+    /// 命令注册表
+    pub registry: Option<CommandRegistry>,
 }
 
 /// 检查命令是否匹配安全拦截模式。
@@ -38,6 +55,60 @@ pub(crate) fn check_safety(command: &str, patterns: &[String]) -> Result<(), Nas
     Ok(())
 }
 
+/// 从 RawCmd 构建 NaCommand 数据结构。
+///
+/// 根据命令类型设置 NaLevel。命令名统一转小写。
+///
+/// **Mode 提取规则**（查表法）：
+/// - 从 registry 中查找该命令的 `known_modes`（小写）。
+/// - 若 args[0] 匹配已知 mode（大小写不敏感），提取为 `NaCommand.mode` 并从 args 移除。
+/// - 若不匹配，args[0] 保持为普通参数。
+/// - 外部/插件命令的 `known_modes` 为空，不做 mode 提取，args 原样透传。
+///
+/// # 参数
+/// - `cmd`: 解析后的命令
+/// - `long_argument`: 长参数内容
+/// - `registry`: 命令注册表（用于查已知 mode 列表）
+fn build_nacommand(
+    cmd: &RawCmd,
+    long_argument: Option<String>,
+    registry: &CommandRegistry,
+) -> NaCommand {
+    let level = match cmd.cmd_type {
+        CmdType::NaCommandNormal => NaLevel::Normal,
+        CmdType::NaCommandSystem => NaLevel::System,
+        _ => NaLevel::Normal,
+    };
+
+    let lower_cmd = cmd.cmd.to_lowercase();
+
+    // 查表：该命令的已知 mode 列表
+    let known_modes = registry
+        .lookup(&lower_cmd)
+        .map(|meta| meta.known_modes.clone())
+        .unwrap_or_default();
+
+    // 查表法提取 mode：args[0] 匹配已知 mode → mode，否则 → arg
+    let (mode, args) = if !known_modes.is_empty() && !cmd.args.is_empty() {
+        let first_lower = cmd.args[0].to_lowercase();
+        if known_modes.iter().any(|m| m.to_lowercase() == first_lower) {
+            (Some(first_lower), cmd.args[1..].to_vec())
+        } else {
+            (None, cmd.args.clone())
+        }
+    } else {
+        (None, cmd.args.clone())
+    };
+
+    NaCommand {
+        level,
+        cmd: lower_cmd,
+        mode,
+        args,
+        long_argument,
+    }
+}
+
 /// 分派命令到对应的执行器。
 ///
 /// Shell 命令通过 `-c` 模式执行。`cd` 命令由 Rust 进程直接处理以保持目录状态。
@@ -47,7 +118,7 @@ pub(crate) fn check_safety(command: &str, patterns: &[String]) -> Result<(), Nas
 /// # 参数
 /// - `cmd`: 解析后的命令
 /// - `ctx`: 执行上下文
-pub fn dispatch(cmd: &RawCmd, ctx: &mut ExecContext) -> Result<(String, bool), NashellError> {
+pub fn dispatch(cmd: &RawCmd, ctx: &mut ExecContext) -> Result<(String, OutputType), NashellError> {
     // 安全拦截检查（在正式执行前）
     let full_cmd_str = {
         let mut s = cmd.cmd.clone();
@@ -68,7 +139,7 @@ pub fn dispatch(cmd: &RawCmd, ctx: &mut ExecContext) -> Result<(String, bool), N
             // 拦截 cd 命令：由 Rust 进程直接切换目录，保持状态
             if cmd.cmd == "cd" && cmd.args.len() <= 1 {
                 shell_exec::exec_cd(&cmd.args)?;
-                return Ok((String::new(), false));
+                return Ok((String::new(), OutputType::Shell));
             }
 
             // -c 捕获执行
@@ -79,7 +150,7 @@ pub fn dispatch(cmd: &RawCmd, ctx: &mut ExecContext) -> Result<(String, bool), N
                 ctx.timeout_secs,
             )?;
             if result.exit_code == 0 {
-                Ok((result.stdout, true))
+                Ok((result.stdout, OutputType::Shell))
             } else {
                 let mut msg = result.stdout;
                 if !result.stderr.is_empty() {
@@ -88,7 +159,7 @@ pub fn dispatch(cmd: &RawCmd, ctx: &mut ExecContext) -> Result<(String, bool), N
                     }
                     msg.push_str(&result.stderr);
                 }
-                Ok((msg, true))
+                Ok((msg, OutputType::Shell))
             }
         }
         CmdType::Interactive => Err(NashellError::Execute {
@@ -108,12 +179,21 @@ pub fn dispatch(cmd: &RawCmd, ctx: &mut ExecContext) -> Result<(String, bool), N
                 msg.push_str(&result.stderr);
             }
             // 标记为 Bash 输出，以便 REPL 使用亮黄色标识
-            Ok((msg, false))
+            Ok((msg, OutputType::Bash))
         }
         CmdType::NaCommandNormal | CmdType::NaCommandSystem => {
-            Err(NashellError::CommandNotFound {
-                name: cmd.cmd.clone(),
-            })
+            let registry = ctx.registry.as_ref().ok_or_else(|| {
+                NashellError::CommandNotFound {
+                    name: cmd.cmd.clone(),
+                }
+            })?;
+            let nacmd = build_nacommand(cmd, ctx.long_argument.clone(), registry);
+            let output = crate::nacommand::execute_nacommand(
+                &nacmd,
+                ctx.pre_out.clone(),
+                registry,
+            )?;
+            Ok((output, OutputType::NaCommand))
         }
     }
 }
@@ -162,6 +242,8 @@ mod tests {
             pre_out: None,
             timeout_secs: 120,
             deny_patterns: Vec::new(),
+            long_argument: None,
+            registry: None,
         }
     }
 
@@ -173,9 +255,9 @@ mod tests {
             args: vec!["hello_world".to_string()],
         };
         let mut ctx = test_ctx();
-        let (output, is_shell) = dispatch(&cmd, &mut ctx).unwrap();
+        let (output, output_type) = dispatch(&cmd, &mut ctx).unwrap();
         assert!(output.contains("hello_world"));
-        assert!(is_shell);
+        assert!(matches!(output_type, OutputType::Shell));
     }
 
     #[test]
@@ -228,9 +310,9 @@ mod tests {
             args: vec!["echo hello_from_bash".to_string()],
         };
         let mut ctx = test_ctx();
-        let (output, is_bash) = dispatch(&cmd, &mut ctx).unwrap();
+        let (output, output_type) = dispatch(&cmd, &mut ctx).unwrap();
         assert!(output.contains("hello_from_bash"));
-        assert!(!is_bash); // Bash 命令返回 false 表示非普通 shell
+        assert!(matches!(output_type, OutputType::Bash));
     }
 
     #[test]
@@ -261,5 +343,102 @@ mod tests {
         };
         let result = dispatch(&cmd, &mut ctx);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_build_nacommand_normal_with_help() {
+        // args[0]="Help" 匹配 known_modes=["help"] → 提取为 mode
+        let mut registry = CommandRegistry::new();
+        registry.register_builtin(crate::app::CmdMeta {
+            level: crate::app::Level::Normal,
+            name: "write".to_string(),
+            exec: "n_write".to_string(),
+            long_argument: true,
+            exec_script: None,
+            known_modes: vec!["help".to_string()],
+        });
+        let cmd = RawCmd {
+            cmd_type: CmdType::NaCommandNormal,
+            cmd: "Write".to_string(),
+            args: vec!["Help".to_string()],
+        };
+        let nacmd = build_nacommand(&cmd, None, &registry);
+        assert_eq!(nacmd.cmd, "write");
+        assert_eq!(nacmd.mode.as_deref(), Some("help"));
+        assert!(nacmd.args.is_empty());
+    }
+
+    #[test]
+    fn test_build_nacommand_normal_with_path_arg() {
+        // args[0]="./test.txt" 不匹配 known_modes=["help"] → 保持为 arg
+        let mut registry = CommandRegistry::new();
+        registry.register_builtin(crate::app::CmdMeta {
+            level: crate::app::Level::Normal,
+            name: "write".to_string(),
+            exec: "n_write".to_string(),
+            long_argument: true,
+            exec_script: None,
+            known_modes: vec!["help".to_string()],
+        });
+        let cmd = RawCmd {
+            cmd_type: CmdType::NaCommandNormal,
+            cmd: "Write".to_string(),
+            args: vec!["./test.txt".to_string()],
+        };
+        let nacmd = build_nacommand(&cmd, None, &registry);
+        assert_eq!(nacmd.cmd, "write");
+        assert_eq!(nacmd.mode, None);
+        assert_eq!(nacmd.args, vec!["./test.txt"]);
+    }
+
+    #[test]
+    fn test_build_nacommand_normal_with_plain_filename() {
+        // flake.nix 不在 known_modes 中 → 不提取为 mode
+        let mut registry = CommandRegistry::new();
+        registry.register_builtin(crate::app::CmdMeta {
+            level: crate::app::Level::Normal,
+            name: "open".to_string(),
+            exec: "n_open".to_string(),
+            long_argument: false,
+            exec_script: None,
+            known_modes: vec!["help".to_string()],
+        });
+        let cmd = RawCmd {
+            cmd_type: CmdType::NaCommandNormal,
+            cmd: "Open".to_string(),
+            args: vec!["flake.nix".to_string()],
+        };
+        let nacmd = build_nacommand(&cmd, None, &registry);
+        assert_eq!(nacmd.cmd, "open");
+        assert_eq!(nacmd.mode, None);
+        assert_eq!(nacmd.args, vec!["flake.nix"]);
+    }
+
+    #[test]
+    fn test_build_nacommand_system_with_mode() {
+        // NaCommandSystem 同样查表：args[0]="Watch" 匹配 known_modes → mode
+        let mut registry = CommandRegistry::new();
+        registry.register_builtin(crate::app::CmdMeta {
+            level: crate::app::Level::System,
+            name: "shell".to_string(),
+            exec: "n_shell".to_string(),
+            long_argument: false,
+            exec_script: None,
+            known_modes: vec![
+                "watch".to_string(),
+                "destroy".to_string(),
+                "switch".to_string(),
+            ],
+        });
+        let cmd = RawCmd {
+            cmd_type: CmdType::NaCommandSystem,
+            cmd: "Shell".to_string(),
+            args: vec!["Watch".to_string(), "-i".to_string(), "abc".to_string()],
+        };
+        let nacmd = build_nacommand(&cmd, None, &registry);
+        assert_eq!(nacmd.cmd, "shell");
+        assert_eq!(nacmd.mode.as_deref(), Some("watch"));
+        assert_eq!(nacmd.args, vec!["-i", "abc"]);
+        assert!(matches!(nacmd.level, NaLevel::System));
     }
 }

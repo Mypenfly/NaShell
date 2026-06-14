@@ -22,6 +22,12 @@ pub struct CmdMeta {
     pub long_argument: bool,
     /// 可选执行脚本后缀
     pub exec_script: Option<String>,
+    /// 已知的子命令/模式列表（小写）。
+    ///
+    /// mode 提取规则：args[0] 若在此列表中（大小写不敏感），则被提取为 `NaCommand.mode`，
+    /// 并从 args 中移除。否则保持为普通 arg。
+    /// 外部配置命令和插件命令的此字段为空（不做查表，原样透传）。
+    pub known_modes: Vec<String>,
 }
 
 /// 插件元数据
@@ -73,11 +79,13 @@ mod tests {
             exec: "n_write".to_string(),
             long_argument: true,
             exec_script: None,
+            known_modes: vec!["help".to_string()],
         };
         assert_eq!(meta.name, "write");
         assert_eq!(meta.exec, "n_write");
         assert!(meta.long_argument);
         assert!(meta.exec_script.is_none());
+        assert_eq!(meta.known_modes, vec!["help"]);
     }
 
     #[test]
@@ -88,6 +96,7 @@ mod tests {
             exec: "n_config".to_string(),
             long_argument: true,
             exec_script: Some(".conf".to_string()),
+            known_modes: vec![],
         };
         assert_eq!(meta.exec_script.as_deref(), Some(".conf"));
     }
@@ -122,6 +131,7 @@ mod tests {
                 exec: "n_write".to_string(),
                 long_argument: true,
                 exec_script: None,
+                known_modes: vec!["help".to_string()],
             }],
             config_cmds: Vec::new(),
             plugins: Vec::new(),

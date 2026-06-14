@@ -7,7 +7,8 @@ use std::process::{Command, Stdio};
 use crate::config::alias;
 use crate::config::schema::NashellConfig;
 use crate::error::display::format_error;
-use crate::executor::{self, ExecContext};
+use crate::executor::{self, ExecContext, OutputType};
+use crate::nacommand::registry::CommandRegistry;
 use crate::parser;
 use crate::parser::syntax::CmdType;
 use rustyline::DefaultEditor;
@@ -68,33 +69,44 @@ fn print_shell_prefix(shell_type: &str, config: &NashellConfig) {
     let _ = writeln!(stdout, "{}", prefix);
 }
 
-/// 打印带有 shell 类型标识的输出（captured 模式用）。
+/// 打印带有类型标识的输出（captured 模式用）。
 ///
-/// Shell 命令输出前显示 `@nu #>>` 或 `@bash #>>` 标识，
-/// 颜色来自配置的 `shell_type_fg`。Bash 命令使用亮黄色 `Bash:` 标识。
+/// Shell 命令输出前显示 `@nu #>>` 或 `@bash #>>`，
+/// NaCommand 输出前显示 `@System #>>`，
+/// Bash 命令使用亮黄色 `Bash:` 标识。
 fn print_captured_output(
     output: &str,
     shell_type: &str,
     config: &NashellConfig,
-    is_bash: bool,
+    output_type: OutputType,
 ) {
     if output.is_empty() {
         return;
     }
     let mut stdout = std::io::stdout();
 
-    if is_bash {
-        let prefix = prompt::colorize(
-            "Bash:",
-            &config.prompts.bash_output_prompt_fg,
-        );
-        let _ = writeln!(stdout, "{}", prefix);
-    } else {
-        let prefix = prompt::colorize(
-            &format!("@{} #>>", shell_type),
-            &config.prompts.shell_type_fg,
-        );
-        let _ = writeln!(stdout, "{}", prefix);
+    match output_type {
+        OutputType::Bash => {
+            let prefix = prompt::colorize(
+                "Bash:",
+                &config.prompts.bash_output_prompt_fg,
+            );
+            let _ = writeln!(stdout, "{}", prefix);
+        }
+        OutputType::NaCommand => {
+            let prefix = prompt::colorize(
+                &config.prompts.output_prompt_format,
+                &config.prompts.output_prompt_fg,
+            );
+            let _ = writeln!(stdout, "{}", prefix);
+        }
+        OutputType::Shell => {
+            let prefix = prompt::colorize(
+                &format!("@{} #>>", shell_type),
+                &config.prompts.shell_type_fg,
+            );
+            let _ = writeln!(stdout, "{}", prefix);
+        }
     }
 
     let _ = writeln!(stdout, "{}", output.trim_end());
@@ -141,6 +153,7 @@ pub fn run(
     home_dir: Option<std::path::PathBuf>,
     config: &NashellConfig,
     shell_type: &str,
+    registry: CommandRegistry,
 ) {
     let mut stdout = std::io::stdout();
     let mut rl = match DefaultEditor::new() {
@@ -238,7 +251,7 @@ pub fn run(
                 // === Captured 模式：有管道 / 异步 / Bash ===
                 let mut pre_out: Option<String> = None;
                 let cmd_count = raw_commands.commands.len();
-                let mut last_is_bash = false;
+                let mut last_output_type = OutputType::Shell;
 
                 for (i, cmd) in raw_commands.commands.iter().enumerate() {
                     let is_last = i == cmd_count - 1;
@@ -247,18 +260,19 @@ pub fn run(
                         pre_out: pre_out.clone(),
                         timeout_secs: config.shell.timeout_secs,
                         deny_patterns: config.safety.deny_patterns.clone(),
+                        long_argument: if i == 0 {
+                            raw_commands.long_argument.clone()
+                        } else {
+                            None
+                        },
+                        registry: Some(registry.clone()),
                     };
 
                     match executor::dispatch(cmd, &mut ctx) {
-                        Ok((output, is_shell)) => {
+                        Ok((output, output_type)) => {
                             pre_out = Some(output);
                             if is_last {
-                                last_is_bash = !is_shell
-                                    && cmd.cmd == "bash"
-                                    && matches!(
-                                        cmd.cmd_type,
-                                        CmdType::NaCommandSystem
-                                    );
+                                last_output_type = output_type;
                             }
                         }
                         Err(e) => {
@@ -271,7 +285,7 @@ pub fn run(
                 }
 
                 if let Some(ref output) = pre_out {
-                    print_captured_output(output, shell_type, config, last_is_bash);
+                    print_captured_output(output, shell_type, config, last_output_type);
                 }
 
                 if raw_commands.async_name.is_some() {
