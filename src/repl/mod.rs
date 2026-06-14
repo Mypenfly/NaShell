@@ -12,6 +12,7 @@ use crate::executor::{self, ExecContext, OutputType};
 use crate::nacommand::registry::CommandRegistry;
 use crate::parser;
 use crate::parser::syntax::CmdType;
+use crate::plugin::broadcast::broadcast_event;
 use crate::shell::manager::ShellManager;
 use rustyline::DefaultEditor;
 
@@ -143,6 +144,53 @@ fn build_cmd_string(cmd: &parser::syntax::RawCmd) -> String {
     s
 }
 
+/// 若 cwd 发生变更则广播 cwd_changed 事件。
+fn broadcast_cwd_if_changed(
+    old_cwd: &std::path::PathBuf,
+    plugin_manager: &Option<Arc<Mutex<crate::plugin::manager::PluginManager>>>,
+) {
+    let new_cwd = input::current_dir();
+    if new_cwd == *old_cwd {
+        return;
+    }
+    if let Some(ref pm) = plugin_manager {
+        let mut mgr = pm.lock().unwrap_or_else(|e| e.into_inner());
+        let mut handles: Vec<&mut crate::plugin::manager::PluginHandle> =
+            mgr.handles_mut().collect();
+        let payload = serde_json::json!({"path": new_cwd.to_string_lossy()});
+        let _ = broadcast_event("cwd_changed", &payload, &mut handles);
+    }
+}
+
+/// 广播 shell_state_changed 事件，包含当前所有 shell 的状态快照。
+fn broadcast_shell_state(
+    plugin_manager: &Option<Arc<Mutex<crate::plugin::manager::PluginManager>>>,
+    shell_manager: &Arc<Mutex<ShellManager>>,
+) {
+    if let Some(ref pm) = plugin_manager {
+        let payload = {
+            let mgr = shell_manager.lock().unwrap_or_else(|e| e.into_inner());
+            let shells: Vec<serde_json::Value> = mgr
+                .list_shells()
+                .iter()
+                .map(|(name, id, path, pools_count)| {
+                    serde_json::json!({
+                        "name": name,
+                        "id": id,
+                        "path": path,
+                        "pools_count": pools_count,
+                    })
+                })
+                .collect();
+            serde_json::json!({ "shells": shells })
+        };
+        let mut mgr = pm.lock().unwrap_or_else(|e| e.into_inner());
+        let mut handles: Vec<&mut crate::plugin::manager::PluginHandle> =
+            mgr.handles_mut().collect();
+        let _ = broadcast_event("shell_state_changed", &payload, &mut handles);
+    }
+}
+
 /// 运行 REPL（Read-Eval-Print Loop）循环。
 ///
 /// 显示提示符，读取用户输入，解析并执行，循环直到用户输入 `exit` 或 EOF。
@@ -216,6 +264,8 @@ pub fn run(
             alias::expand_alias(&input, &config.aliases)
         };
 
+        let old_cwd = input::current_dir();
+
         match parser::parse(&expanded) {
             Ok(raw_commands) => {
                 log::debug!(
@@ -231,63 +281,40 @@ pub fn run(
 
                 // === 异步执行 ===
                 // 若 @/Async(name) 存在，跳过同步执行，
-                // 直接在后台线程中异步运行命令，立即返回确认信息。
+                // 在后台线程中走完整解析→分派流程异步运行命令，立即返回确认信息。
                 if let Some(ref async_name) = raw_commands.async_name {
-                    let cmd_str = raw_commands
-                        .commands
-                        .iter()
-                        .map(|c| {
-                            let mut s = c.cmd.clone();
-                            for arg in &c.args {
-                                s.push(' ');
-                                s.push_str(arg);
-                            }
-                            s
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" | ");
-
-                    let is_bash = raw_commands
-                        .commands
-                        .first()
-                        .map(|c| {
-                            matches!(c.cmd_type, CmdType::NaCommandSystem)
-                                && c.cmd == "bash"
-                        })
-                        .unwrap_or(false);
-
                     let cwd = input::current_dir();
 
-                    let result = if is_bash {
-                        let bash_args = raw_commands
-                            .commands
-                            .first()
-                            .and_then(|c| c.args.first())
-                            .cloned()
-                            .unwrap_or_default();
-                        executor::async_exec::spawn_async_bash_exec(
-                            async_name,
-                            &bash_args,
-                            config.shell.timeout_secs,
-                            &shell_manager,
-                            &cwd,
-                        )
-                    } else {
-                        executor::async_exec::spawn_async_shell_exec(
-                            async_name,
-                            &cmd_str,
-                            shell_type,
-                            config.shell.timeout_secs,
-                            &shell_manager,
-                            &cwd,
-                        )
-                    };
+                    let result = executor::async_exec::spawn_async_shell_exec(
+                        async_name,
+                        &raw_commands,
+                        shell_type,
+                        config.shell.timeout_secs,
+                        &config.safety.deny_patterns,
+                        &shell_manager,
+                        registry.clone(),
+                        plugin_manager.clone(),
+                        &cwd,
+                    );
 
                     match result {
                         Ok(info) => {
+                            let cmd_desc = raw_commands
+                                .commands
+                                .iter()
+                                .map(|c| {
+                                    let mut s = c.cmd.clone();
+                                    for arg in &c.args {
+                                        s.push(' ');
+                                        s.push_str(arg);
+                                    }
+                                    s
+                                })
+                                .collect::<Vec<_>>()
+                                .join(" | ");
                             let msg = format!(
                                 "shell created and exec: {}\n  name: {}    id: {}",
-                                cmd_str, info.name, info.id
+                                cmd_desc, info.name, info.id
                             );
                             writeln!(stdout, "{}", msg).ok();
                         }
@@ -372,6 +399,14 @@ pub fn run(
                 if let Some(ref output) = pre_out {
                     print_captured_output(output, shell_type, config, last_output_type);
                 }
+
+                // 若管道中包含 shell 管理命令，广播 shell 状态变更
+                let has_shell_cmd = raw_commands.commands.iter().any(|c| {
+                    matches!(c.cmd_type, CmdType::NaCommandSystem) && c.cmd == "shell"
+                });
+                if has_shell_cmd {
+                    broadcast_shell_state(&plugin_manager, &shell_manager);
+                }
             }
             Err(e) => {
                 let formatted = format_error(&e);
@@ -384,6 +419,9 @@ pub fn run(
             let cwd = input::current_dir();
             shell_manager.lock().ok().map(|mut m| m.sync_main_cwd(&cwd));
         }
+
+        // 广播 cwd 变更事件
+        broadcast_cwd_if_changed(&old_cwd, &plugin_manager);
 
         let _ = stdout.flush();
     }

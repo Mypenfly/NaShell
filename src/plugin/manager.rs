@@ -1,12 +1,17 @@
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufReader, Write};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::app::PluginMeta;
-use crate::constants::PLUGIN_TIMEOUT_SECS;
+use crate::constants::{PLUGIN_RECV_TIMEOUT_SECS, PLUGIN_TIMEOUT_SECS};
 use crate::error::NashellError;
-use crate::plugin::protocol::{send_message, PluginCall, PluginMessage, PluginOff, PluginResponse};
+use crate::plugin::protocol::{
+    recv_message, send_message, GetInput, PluginCall, PluginMessage, PluginOff, PluginResponse,
+};
+use crate::repl::prompt::colorize;
 
 /// 插件进程句柄，维护与单个插件子进程的通信。
 #[derive(Debug)]
@@ -158,14 +163,13 @@ impl PluginManager {
 
     /// 从插件接收 response 消息直到收到 off 消息。
     ///
-    /// 此函数阻塞等待插件回复，处理 toExec 请求并回传 exec_result。
-    /// 当 response 的 is_print 为 true 且 streaming 为 true 时，
-    /// out_content 会实时写入 out_writer（实现流式输出）。
+    /// 启动一个看门狗线程防止插件响应超时。超时后强制终止插件进程。
+    /// response 消息中的 streaming 输出实时打印到 stdout。
     /// 收到 off 消息后返回收集到的所有 response 和 off 数据。
     ///
     /// # 参数
     /// - `handle`: 插件进程句柄
-    /// - `out_writer`: 用于实时流式输出的 writer
+    /// - `out_writer`: 用于 off 消息最终输出的 writer（由调用方在 recv 后使用）
     /// - `shell_type`: 当前 shell 类型
     /// - `timeout_secs`: shell 命令超时
     /// - `deny_patterns`: 安全拦截模式
@@ -173,11 +177,12 @@ impl PluginManager {
     /// - `shell_manager`: Shell 管理器
     ///
     /// # 返回
-    /// - `(Vec<PluginResponse>, PluginOff)`: 所有 response 消息和最终的 off 消息
+    /// - `(Vec<PluginResponse>, PluginOff)`: 所有 response 和最终的 off 消息
     ///
     /// # 错误
-    /// - 接收超时
+    /// - 插件响应超时
     /// - 插件进程意外退出
+    /// - 收到非预期的消息类型
     pub fn recv_responses(
         handle: &mut PluginHandle,
         out_writer: &mut dyn std::io::Write,
@@ -187,10 +192,7 @@ impl PluginManager {
         registry: &crate::nacommand::registry::CommandRegistry,
         shell_manager: Option<std::sync::Arc<std::sync::Mutex<crate::shell::manager::ShellManager>>>,
     ) -> Result<(Vec<PluginResponse>, PluginOff), NashellError> {
-        let mut responses = Vec::new();
         let plugin_name = handle.name().to_string();
-
-        // Take stdout out of handle so we can hold a BufReader for the entire session.
         let stdout = handle
             .child
             .stdout
@@ -200,70 +202,117 @@ impl PluginManager {
                 detail: "无法获取插件 stdout".to_string(),
             })?;
 
-        let mut reader = BufReader::new(stdout);
-
-        loop {
-            let mut line = String::new();
-            loop {
-                line.clear();
-                let bytes = reader.read_line(&mut line).map_err(|e| NashellError::Io {
-                    path: None,
-                    source: e,
-                })?;
-                if bytes == 0 {
-                    return Err(NashellError::Plugin {
-                        plugin_name: plugin_name.clone(),
-                        detail: "插件连接意外关闭（读取到 EOF）".to_string(),
-                    });
+        // 看门狗线程：超时后强制终止插件进程
+        let timed_out = Arc::new(AtomicBool::new(false));
+        let pid = handle.child.id();
+        {
+            let timed_out = timed_out.clone();
+            let watchdog_name = plugin_name.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_secs(PLUGIN_RECV_TIMEOUT_SECS));
+                timed_out.store(true, Ordering::SeqCst);
+                log::warn!(
+                    "插件 '{}' 响应超时 ({}s)，强制终止 pid={}",
+                    watchdog_name,
+                    PLUGIN_RECV_TIMEOUT_SECS,
+                    pid
+                );
+                unsafe {
+                    libc::kill(pid as i32, libc::SIGTERM);
+                    std::thread::sleep(Duration::from_secs(2));
+                    libc::kill(pid as i32, libc::SIGKILL);
                 }
-                let trimmed = line.trim();
-                if !trimmed.is_empty() {
-                    break;
+            });
+        }
+
+        let reader = BufReader::new(stdout);
+        let result = Self::read_plugin_responses(
+            reader, handle, shell_type, timeout_secs,
+            deny_patterns, registry, shell_manager,
+        );
+
+        // 流式输出已在 read_plugin_responses 打印至 stdout，
+        // out_writer 由调用方在 recv 后用于 off 消息输出
+        let _ = out_writer;
+
+        match result {
+            Ok(resp_and_off) => Ok(resp_and_off),
+            Err(e) => {
+                if timed_out.load(Ordering::SeqCst) {
+                    let _ = handle.child.kill();
+                    let _ = handle.child.wait();
+                    Err(NashellError::Timeout {
+                        command: plugin_name,
+                        seconds: PLUGIN_RECV_TIMEOUT_SECS,
+                    })
+                } else {
+                    Err(e)
                 }
             }
+        }
+    }
 
-            let msg: PluginMessage =
-                serde_json::from_str(line.trim()).map_err(|e| NashellError::Plugin {
-                    plugin_name: plugin_name.clone(),
-                    detail: format!("无法解析插件消息: {} (原始: {})", e, line.trim()),
-                })?;
+    /// 读取插件响应消息直至收到 off。
+    ///
+    /// 由 `recv_responses` 调用，执行实际的阻塞读取循环。
+    /// 使用 `protocol::recv_message` 按 NDJSON 帧读取消息。
+    /// 处理 toExec 请求、回传 exec_result、实时流式打印。
+    fn read_plugin_responses(
+        mut reader: BufReader<std::process::ChildStdout>,
+        handle: &mut PluginHandle,
+        shell_type: &str,
+        timeout_secs: u64,
+        deny_patterns: &[String],
+        registry: &crate::nacommand::registry::CommandRegistry,
+        shell_manager: Option<Arc<std::sync::Mutex<crate::shell::manager::ShellManager>>>,
+    ) -> Result<(Vec<PluginResponse>, PluginOff), NashellError> {
+        let mut responses = Vec::new();
+        let plugin_name = handle.name().to_string();
+
+        loop {
+            let msg = recv_message(&mut reader).map_err(|e| NashellError::Plugin {
+                plugin_name: plugin_name.clone(),
+                detail: format!("接收插件消息失败: {}", e),
+            })?;
 
             match msg {
                 PluginMessage::Response { data, .. } => {
-                    // Handle to_exec requests
+                    // Handle to_exec
                     if !data.to_exec.is_empty() {
                         let exec_result = super::toexec::execute_toplevel(
-                            &data.to_exec,
-                            1,
-                            shell_type,
-                            timeout_secs,
-                            deny_patterns,
-                            registry,
-                            shell_manager.clone(),
+                            &data.to_exec, 1, shell_type, timeout_secs,
+                            deny_patterns, registry, shell_manager.clone(),
                         )?;
-
                         let resp_with_result = PluginResponse {
                             streaming: false,
                             out_content: String::new(),
                             out_prompt: None,
+                            prompt_fg: "gray".to_string(),
                             is_print: false,
                             to_exec: vec![],
                             exec_result: Some(exec_result),
+                            get_input: None,
+                            user_input: None,
                         };
                         Self::send_response(handle, &resp_with_result)?;
                     }
-
-                    // Real-time streaming: print immediately if is_print
-                    if data.is_print {
-                        if let Some(ref prompt) = data.out_prompt {
-                            let _ = writeln!(out_writer, "{}", prompt);
-                        }
-                        let _ = write!(out_writer, "{}", data.out_content);
-                        // Ensure streaming content is flushed and visible immediately
-                        let _ = writeln!(out_writer);
-                        let _ = out_writer.flush();
+                    // Handle get_input: pause, display prompt, collect user input
+                    if let Some(ref gi) = data.get_input {
+                        let user_input = request_user_input(gi)?;
+                        let resp_with_input = PluginResponse {
+                            streaming: true,
+                            out_content: String::new(),
+                            out_prompt: None,
+                            prompt_fg: "gray".to_string(),
+                            is_print: false,
+                            to_exec: vec![],
+                            exec_result: None,
+                            get_input: None,
+                            user_input: Some(user_input),
+                        };
+                        Self::send_response(handle, &resp_with_input)?;
                     }
-
+                    print_plugin_response(&data);
                     responses.push(data);
                 }
                 PluginMessage::Off { data, .. } => {
@@ -273,13 +322,14 @@ impl PluginManager {
                 _ => {
                     handle.child.stdout = Some(reader.into_inner());
                     return Err(NashellError::Plugin {
-                        plugin_name: plugin_name.clone(),
+                        plugin_name,
                         detail: "收到意外的消息类型（期望 response 或 off）".to_string(),
                     });
                 }
             }
         }
     }
+
     /// 关闭指定插件进程。
     ///
     /// 先尝试优雅关闭（关闭 stdin 等待进程自行退出），超时或失败则强制 kill。
@@ -329,7 +379,74 @@ impl PluginManager {
     }
 }
 
+/// 将插件的单条 response 消息实时打印到 stdout。
+///
+/// 若 `is_print` 为 true，则以 `prompt_fg` 颜色打印 out_prompt（如有）和 out_content。
+fn print_plugin_response(data: &PluginResponse) {
+    if !data.is_print {
+        return;
+    }
+    let mut stdout = std::io::stdout();
+    if let Some(ref prompt) = data.out_prompt {
+        let colored = crate::repl::prompt::colorize(prompt, &data.prompt_fg);
+        let _ = writeln!(stdout, "{}", colored);
+    }
+    let _ = write!(stdout, "{}", data.out_content);
+    let _ = writeln!(stdout);
+    let _ = stdout.flush();
+}
+
 /// 等待子进程退出，最多等待 `timeout_secs` 秒。
+
+/// 向用户请求交互输入。
+///
+/// 显示 pre_content 和 input_prompt，收集用户的多行输入。
+/// 首行为 input_prompt，续行提示符为 `>> `（Enter 空行提交）。
+fn request_user_input(gi: &GetInput) -> Result<String, NashellError> {
+    let mut stdout = std::io::stdout();
+    let stdin = std::io::stdin();
+
+    if let Some(ref pre) = gi.pre_content {
+        let colored = colorize(pre, &gi.pre_fg);
+        let _ = writeln!(stdout, "{}", colored);
+    }
+
+    let colored_prompt = colorize(&gi.input_prompt, &gi.input_fg);
+    let _ = write!(stdout, "{}", colored_prompt);
+    let _ = stdout.flush();
+
+    let mut lines = Vec::new();
+    let mut buf = String::new();
+    stdin.read_line(&mut buf).map_err(|e| NashellError::Io {
+        path: None,
+        source: e,
+    })?;
+
+    let first = buf.trim_end_matches(|c| c == '\n' || c == '\r').to_string();
+    lines.push(first.clone());
+    buf.clear();
+
+    // Continue reading until empty line (multi-line input)
+    let cont_prompt = colorize(">> ", "");
+    loop {
+        let _ = write!(stdout, "{}", cont_prompt);
+        let _ = stdout.flush();
+        buf.clear();
+        stdin.read_line(&mut buf).map_err(|e| NashellError::Io {
+            path: None,
+            source: e,
+        })?;
+        let trimmed = buf.trim_end_matches(|c| c == '\n' || c == '\r').to_string();
+        if trimmed.is_empty() {
+            break;
+        }
+        lines.push(trimmed);
+    }
+
+    Ok(lines.join("\n"))
+}
+
+/// 等待子进程退出，最多等待 `timeout_secs` 秒。，最多等待 `timeout_secs` 秒。
 ///
 /// 返回 `Ok(true)` 表示进程已退出，`Ok(false)` 表示超时。
 fn wait_timeout(child: &mut Child, timeout_secs: u64) -> Result<bool, std::io::Error> {

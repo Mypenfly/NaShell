@@ -15,7 +15,7 @@ use crate::plugin::protocol::{send_message, PluginBroadcast, PluginMessage};
 pub fn broadcast_event(
     event: &str,
     payload: &serde_json::Value,
-    plugins: &mut [PluginHandle],
+    plugins: &mut [&mut PluginHandle],
 ) -> Result<(), NashellError> {
     let msg = PluginMessage::Broadcast {
         sender: "nashell".to_string(),

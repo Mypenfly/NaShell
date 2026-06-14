@@ -87,7 +87,7 @@ pub fn execute_nacommand(
 
             PluginManager::send_call(handle, &call)?;
 
-            let (responses, off) = PluginManager::recv_responses(
+            let (_responses, off) = PluginManager::recv_responses(
                 handle,
                 out_writer,
                 shell_type,
@@ -99,11 +99,12 @@ pub fn execute_nacommand(
 
             // Build final output: only non-streaming (off message) content
             // Streaming responses were already written to out_writer by recv_responses.
-            let mut output = String::new();
+            let output = String::new();
             // Handle off message output
             if off.is_print && !off.out_content.is_empty() {
                 if let Some(ref prompt) = off.out_prompt {
-                    let _ = writeln!(out_writer, "{}", prompt);
+                    let colored = crate::repl::prompt::colorize(prompt, &off.prompt_fg);
+                    let _ = writeln!(out_writer, "{}", colored);
                 }
                 let _ = writeln!(out_writer, "{}", off.out_content);
             }

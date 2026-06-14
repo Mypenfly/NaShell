@@ -341,9 +341,23 @@ pub struct PluginResponse {
     pub streaming: bool,
     pub out_content: String,
     pub out_prompt: Option<String>,
+    /// 输出提示符前景色，默认 "gray"
+    pub prompt_fg: String,
     pub is_print: bool,
     pub to_exec: Vec<String>,
     pub exec_result: Option<Vec<String>>,
+    /// 交互式输入请求 (Phase 7 后期追加)
+    pub get_input: Option<GetInput>,
+    /// 用户输入结果，主程序回传给插件 (Phase 7 后期追加)
+    pub user_input: Option<String>,
+}
+
+/// 交互式输入请求结构
+pub struct GetInput {
+    pub pre_content: Option<String>,
+    pub pre_fg: String,
+    pub input_prompt: String,
+    pub input_fg: String,
 }
 
 /// 插件发给主程序的 off 消息
@@ -351,6 +365,8 @@ pub struct PluginOff {
     pub to_exec: Vec<String>,
     pub out_content: String,
     pub out_prompt: Option<String>,
+    /// 输出提示符前景色，默认 "gray"
+    pub prompt_fg: String,
     pub is_print: bool,
 }
 
@@ -644,8 +660,11 @@ pub const MAX_OPEN_LIMIT: usize = 2000;
 /// Shell 默认超时（秒）
 pub const DEFAULT_SHELL_TIMEOUT_SECS: u64 = 120;
 
-/// 插件通信默认超时（秒）
+/// 插件通信默认超时（秒），用于关闭/停止等待
 pub const PLUGIN_TIMEOUT_SECS: u64 = 30;
+
+/// 插件响应读取超时（秒），用于 recv_responses 的阻塞读取
+pub const PLUGIN_RECV_TIMEOUT_SECS: u64 = 90;
 
 /// toExec 最大递归深度
 pub const TOEXEC_MAX_DEPTH: u32 = 3;

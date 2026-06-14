@@ -1,14 +1,18 @@
 use crate::constants::TOEXEC_MAX_DEPTH;
 use crate::error::NashellError;
-use crate::parser;
-use crate::nacommand::registry::CommandRegistry;
-use std::sync::{Arc, Mutex};
-use crate::shell::manager::ShellManager;
+use crate::executor::shell_exec;
 use crate::executor::ExecContext;
+use crate::nacommand::registry::CommandRegistry;
+use crate::parser;
+use crate::shell::manager::ShellManager;
+use std::sync::{Arc, Mutex};
 
 /// 执行插件 toExec 中的命令列表。
 ///
-/// 按顺序逐条执行命令，每条命令走完整的用户级解析+分派流程（与用户在 REPL 中输入命令完全一致）。
+/// 每条命令按顺序执行。执行模式按是否有管道区分：
+/// - 无管道：Shell 命令走直连模式（实时输出），NaCommand 走 captured dispatch
+/// - 有管道：全管道走 captured dispatch 逐段传递
+///
 /// 深度计数防止无限递归：超过 TOEXEC_MAX_DEPTH 后，NaCommand 报错拒绝，仅允许纯 shell 命令。
 ///
 /// # 参数
@@ -53,24 +57,100 @@ pub fn execute_toplevel(
             }
         };
 
-        for raw_cmd in &parsed.commands {
-            use crate::parser::syntax::CmdType;
+        if parsed.commands.is_empty() {
+            continue;
+        }
 
-            // 深度检查：NaCommand 在超过深度时拒绝
-            if depth_exceeded {
-                match &raw_cmd.cmd_type {
-                    CmdType::NaCommandNormal | CmdType::NaCommandSystem => {
-                        results.push(format!(
-                            "@Error #>>\ntoExec 递归深度超过限制 ({}), NaCommand '{}' 被拒绝",
-                            TOEXEC_MAX_DEPTH, raw_cmd.cmd
-                        ));
-                        continue;
+        let has_pipes = parsed.commands.len() > 1;
+
+        if !has_pipes {
+            // 无管道：单命令执行
+            let raw_cmd = &parsed.commands[0];
+            results.push(execute_single_direct(
+                raw_cmd,
+                cmd_line,
+                &parsed,
+                shell_type,
+                timeout_secs,
+                deny_patterns,
+                registry,
+                shell_manager.as_ref(),
+                depth_exceeded,
+            ));
+        } else {
+            // 有管道：captured 逐段 dispatch
+            results.push(execute_pipeline_captured(
+                &parsed,
+                cmd_line,
+                shell_type,
+                timeout_secs,
+                deny_patterns,
+                registry,
+                shell_manager.as_ref(),
+                depth_exceeded,
+            ));
+        }
+    }
+
+    Ok(results)
+}
+
+/// 执行单个无管道命令（直连模式优先）。
+fn execute_single_direct(
+    raw_cmd: &crate::parser::syntax::RawCmd,
+    cmd_line: &str,
+    parsed: &crate::parser::syntax::RawCommands,
+    shell_type: &str,
+    timeout_secs: u64,
+    deny_patterns: &[String],
+    registry: &CommandRegistry,
+    shell_manager: Option<&Arc<Mutex<ShellManager>>>,
+    depth_exceeded: bool,
+) -> String {
+    use crate::parser::syntax::CmdType;
+
+    // 深度检查
+    if depth_exceeded {
+        match &raw_cmd.cmd_type {
+            CmdType::NaCommandNormal | CmdType::NaCommandSystem => {
+                return format!(
+                    "@Error #>>\ntoExec 递归深度超过限制 ({}), NaCommand '{}' 被拒绝",
+                    TOEXEC_MAX_DEPTH, raw_cmd.cmd
+                );
+            }
+            CmdType::Shell => {}
+        }
+    }
+
+    match &raw_cmd.cmd_type {
+        CmdType::Shell => {
+            let annotation = annotate_cmd(cmd_line);
+            if raw_cmd.cmd == "cd" && raw_cmd.args.len() <= 1 {
+                match shell_exec::exec_cd(&raw_cmd.args) {
+                    Ok(()) => format!("{annotation}\n(direct: cd)"),
+                    Err(e) => crate::error::display::format_error(&e),
+                }
+            } else {
+                // 流式捕获：实时输出到终端同时收集完整结果
+                match shell_exec::exec_captured_streaming(
+                    &raw_cmd.cmd, &raw_cmd.args, shell_type, timeout_secs,
+                ) {
+                    Ok(output) => {
+                        let mut text = output.stdout;
+                        if !output.stderr.is_empty() {
+                            if !text.is_empty() {
+                                text.push('\n');
+                            }
+                            text.push_str(&output.stderr);
+                        }
+                        format!("{annotation}\n{}", text.trim())
                     }
-                    CmdType::Shell => {}
+                    Err(e) => crate::error::display::format_error(&e),
                 }
             }
-
-            // 使用 dispatch() — 与用户输入完全相同的执行流程
+        }
+        _ => {
+            // NaCommand：走 captured dispatch
             let mut ctx = ExecContext {
                 shell_type: shell_type.to_string(),
                 pre_out: parsed.pre_out.clone(),
@@ -78,13 +158,12 @@ pub fn execute_toplevel(
                 deny_patterns: deny_patterns.to_vec(),
                 long_argument: parsed.long_argument.clone(),
                 registry: Some(registry.clone()),
-                shell_manager: shell_manager.clone(),
+                shell_manager: shell_manager.cloned(),
                 plugin_manager: None,
             };
-
             let mut out_buf = Vec::new();
             match crate::executor::dispatch(raw_cmd, &mut ctx, &mut out_buf) {
-                Ok((output, _output_type)) => {
+                Ok((output, _)) => {
                     let mut combined = String::from_utf8_lossy(&out_buf).into_owned();
                     if !output.is_empty() {
                         if !combined.is_empty() {
@@ -92,17 +171,82 @@ pub fn execute_toplevel(
                         }
                         combined.push_str(&output);
                     }
-                    results.push(combined);
+                    let annotation = annotate_cmd(cmd_line);
+                    format!("{annotation}\n{}", combined.trim())
                 }
-                Err(e) => {
-                    let err_msg = crate::error::display::format_error(&e);
-                    results.push(err_msg);
+                Err(e) => crate::error::display::format_error(&e),
+            }
+        }
+    }
+}
+
+/// 执行管道命令（captured 逐段 dispatch）。
+fn execute_pipeline_captured(
+    parsed: &crate::parser::syntax::RawCommands,
+    cmd_line: &str,
+    shell_type: &str,
+    timeout_secs: u64,
+    deny_patterns: &[String],
+    registry: &CommandRegistry,
+    shell_manager: Option<&Arc<Mutex<ShellManager>>>,
+    depth_exceeded: bool,
+) -> String {
+    use crate::parser::syntax::CmdType;
+
+    let _cmd_count = parsed.commands.len();
+    let mut pre_out: Option<String> = None;
+
+    for (i, raw_cmd) in parsed.commands.iter().enumerate() {
+        // 深度检查
+        if depth_exceeded {
+            match &raw_cmd.cmd_type {
+                CmdType::NaCommandNormal | CmdType::NaCommandSystem => {
+                    return format!(
+                        "@Error #>>\ntoExec 递归深度超过限制 ({}), NaCommand '{}' 被拒绝",
+                        TOEXEC_MAX_DEPTH, raw_cmd.cmd
+                    );
                 }
+                CmdType::Shell => {}
+            }
+        }
+
+        let mut ctx = ExecContext {
+            shell_type: shell_type.to_string(),
+            pre_out: pre_out.clone(),
+            timeout_secs,
+            deny_patterns: deny_patterns.to_vec(),
+            long_argument: if i == 0 {
+                parsed.long_argument.clone()
+            } else {
+                None
+            },
+            registry: Some(registry.clone()),
+            shell_manager: shell_manager.cloned(),
+            plugin_manager: None,
+        };
+
+        let mut out_buf = Vec::new();
+        match crate::executor::dispatch(raw_cmd, &mut ctx, &mut out_buf) {
+            Ok((output, _)) => {
+                pre_out = Some(output);
+            }
+            Err(e) => {
+                return crate::error::display::format_error(&e);
             }
         }
     }
 
-    Ok(results)
+    let annotation = annotate_cmd(cmd_line);
+    if let Some(output) = pre_out {
+        format!("{annotation}\n{}", output.trim())
+    } else {
+        annotation
+    }
+}
+
+/// 生成嵌套提示符标注命令来源。
+fn annotate_cmd(cmd_line: &str) -> String {
+    crate::repl::prompt::colorize(&format!("  @[{}] #>", cmd_line), "dark_gray")
 }
 
 #[cfg(test)]
@@ -144,6 +288,18 @@ mod tests {
         ).unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].contains("hello_world"));
+    }
+
+    #[test]
+    fn test_execute_toplevel_pipeline_uses_captured() {
+        let registry = test_registry();
+        let to_exec = vec!["echo hello | grep hello".to_string()];
+        let results = execute_toplevel(
+            &to_exec, 0, "bash", 120, &[], &registry, None,
+        ).unwrap();
+        assert_eq!(results.len(), 1);
+        // Captured mode: shows actual output
+        assert!(results[0].contains("hello"));
     }
 
     #[test]
@@ -249,7 +405,7 @@ mod tests {
 
         let to_exec = vec![
             format!("!@Write:{} @/\ncontent", file1.to_string_lossy()),
-            "!@Write: @/\nno_path".to_string(),  // Missing path - should fail but not crash
+            "!@Write: @/\nno_path".to_string(),
         ];
         let results = execute_toplevel(
             &to_exec, 0, "bash", 120, &[], &registry, None,

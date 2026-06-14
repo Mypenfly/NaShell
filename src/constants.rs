@@ -10,8 +10,11 @@ pub const DEFAULT_OPEN_DIR_DEPTH: usize = 3;
 /// Shell 默认超时（秒）
 pub const DEFAULT_SHELL_TIMEOUT_SECS: u64 = 120;
 
-/// 插件通信默认超时（秒）
+/// 插件通信默认超时（秒），用于 stop_plugin 退出等待
 pub const PLUGIN_TIMEOUT_SECS: u64 = 30;
+
+/// 插件响应读取超时（秒），用于 recv_responses 的阻塞读取超时
+pub const PLUGIN_RECV_TIMEOUT_SECS: u64 = 90;
 
 /// toExec 最大递归深度
 pub const TOEXEC_MAX_DEPTH: u32 = 3;
@@ -43,6 +46,7 @@ mod tests {
         assert_eq!(super::DEFAULT_OPEN_DIR_DEPTH, 3);
         assert_eq!(super::DEFAULT_SHELL_TIMEOUT_SECS, 120);
         assert_eq!(super::PLUGIN_TIMEOUT_SECS, 30);
+        assert_eq!(super::PLUGIN_RECV_TIMEOUT_SECS, 90);
         assert_eq!(super::TOEXEC_MAX_DEPTH, 3);
         assert_eq!(super::MAX_PIPE_BUFFER_BYTES, 0);
         assert_eq!(super::DEFAULT_PTY_COLS, 80);

@@ -482,7 +482,7 @@
 
 ---
 
-## Phase 7: 插件系统
+## Phase 7: 插件系统 ✅ 已完成
 
 **目标**：完整插件生命周期管理——加载、通信、执行、关闭。
 
@@ -539,13 +539,25 @@
    - 启动时启动所有 `is_broadcast: true` 的插件并保活
 
 ### 验证
-- 创建测试插件（一个简单脚本，接收 NDJSON call，返回 response + off）
-- 注册插件命令，调用该命令 → 正确返回结果
-- 插件 response 中 `is_print: true` → 内容正确打印
-- 插件 `to_exec` 中的 shell 命令 → 正确执行，结果填入 exec_result
-- 插件 `to_exec` 递归超过 3 层 → NaCommand 被拒绝
-- 插件超时 30 秒无响应 → 强制关闭，报错
-- 广播事件 → 所有 is_broadcast 插件收到消息
+- [x] 创建测试插件（一个简单脚本，接收 NDJSON call，返回 response + off）
+- [x] 注册插件命令，调用该命令 → 正确返回结果
+- [x] 插件 response 中 `is_print: true` → 内容正确打印
+- [x] 插件 `to_exec` 中的 shell 命令 → 正确执行，结果填入 exec_result
+- [x] 插件 `to_exec` 递归超过 3 层 → NaCommand 被拒绝
+- [x] 插件超时 90 秒无响应 → 强制关闭，报错
+- [x] 广播事件 → 所有 is_broadcast 插件收到消息
+
+### 后续完善（Phase 7 后期追加）
+
+以下增强在初始实现之后完成，详见 `plugin_dev.md`：
+
+- **prompt_fg 颜色字段**：PluginResponse / PluginOff 新增 `prompt_fg`，插件可指定输出提示符颜色，默认 `"gray"`
+- **GetInput 交互输入**：新增 `get_input` 字段（含 `pre_content` / `input_prompt` / `pre_fg` / `input_fg`），支持插件在运行中向用户请求交互输入，用户提交后通过 `user_input` 回传
+- **toExec 直连/流式模式**：Shell 单命令（无管道）改为 `exec_captured_streaming` 实时输出到终端同时捕获；有管道仍走 captured dispatch
+- **toExec 结果标注**：每条命令结果前加嵌套提示符 `@[cmd] #>`（dark_gray），区分命令来源
+- **broadcast 事件接入**：`cwd_changed` / `shell_state_changed` 已在 REPL 中触发，payload 含完整 shell 状态
+- **recv_responses 超时**：看门狗线程 90s（`PLUGIN_RECV_TIMEOUT_SECS`），超时 SIGTERM→SIGKILL
+- **demo 插件重写**：`test_plugins/demo_plugin/` 展示 Echo/Stream/Exec/MultiExec/Confirm 全部功能
 
 ---
 
@@ -582,6 +594,16 @@
 - 调用 `!@WebSearch: -q "test"` → 正确执行 `nu ./web_search.nu -q test`
 - 配置带 exec_script 的命令，验证临时脚本生成和清理
 - `!@WebSearch:Help` → 透传 `--help` 输出
+
+### Phase 8 注意事项
+
+> 以下来自 Phase 1-7 积累的经验，进入 Phase 8 时需特别留意：
+
+1. **外部命令也走 toExec 直连逻辑**：若外部命令是不含管道的纯 Shell 调用，应考虑使用 `exec_captured_streaming` 实时输出 + 捕获，与插件 toExec 保持一致。
+2. **config_cmds 查表优先级**：内置 → **外部配置** → 插件。当前 `lookup_with_source` 已实现三级，`nacommand/mod.rs` 中 Config 分支返回了占位错误，需替换为实际调用。
+3. **exec_script 临时文件**：创建在 `/tmp/nashell/` 下，文件名含随机串。执行后无论成功与否均删除。路径处理注意与配置文件所在目录的相对路径解析。
+4. **外部命令支持 `known_modes`**：若外部命令定义了 `known_modes`，`build_nacommand` 会做查表提取 mode。对于大多外部命令此字段为空，mode 保持为 arg 透传。
+5. **配置文件加载**：当前 `NashellConfig.na_commands` 已解析 KDL 的 `NaCommands` 块为 `HashMap<String, ExternalCmdConfig>`，只需在 `main.rs` 中将其转换为 `Vec<CmdMeta>` 写入 registry。
 
 ---
 

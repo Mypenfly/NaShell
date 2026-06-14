@@ -38,25 +38,87 @@ pub struct PluginResponse {
     pub out_content: String,
     /// 输出提示符
     pub out_prompt: Option<String>,
+    /// 输出提示符前景色（默认 "gray"）
+    #[serde(default = "default_prompt_fg")]
+    pub prompt_fg: String,
     /// 是否实时打印
     pub is_print: bool,
     /// 要求主程序代为执行的命令列表
+    #[serde(default)]
     pub to_exec: Vec<String>,
     /// to_exec 的执行结果（由主程序填充后发回）
     pub exec_result: Option<Vec<String>>,
+    /// 交互式输入请求
+    #[serde(default)]
+    pub get_input: Option<GetInput>,
+    /// 用户输入结果（主程序发回给插件）
+    #[serde(default)]
+    pub user_input: Option<String>,
+}
+
+impl Default for PluginResponse {
+    fn default() -> Self {
+        PluginResponse {
+            streaming: false,
+            out_content: String::new(),
+            out_prompt: None,
+            prompt_fg: "gray".to_string(),
+            is_print: false,
+            to_exec: Vec::new(),
+            exec_result: None,
+            get_input: None,
+            user_input: None,
+        }
+    }
 }
 
 /// 插件发给主程序的 off 消息
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginOff {
     /// 关闭前要求执行的命令列表
+    #[serde(default)]
     pub to_exec: Vec<String>,
     /// 最终输出内容
     pub out_content: String,
     /// 输出提示符
     pub out_prompt: Option<String>,
+    /// 输出提示符前景色（默认 "gray"）
+    #[serde(default = "default_prompt_fg")]
+    pub prompt_fg: String,
     /// 是否打印
     pub is_print: bool,
+}
+
+impl Default for PluginOff {
+    fn default() -> Self {
+        PluginOff {
+            to_exec: Vec::new(),
+            out_content: String::new(),
+            out_prompt: None,
+            prompt_fg: "gray".to_string(),
+            is_print: false,
+        }
+    }
+}
+
+/// 交互式输入请求，插件通过 response 的 get_input 字段向用户请求交互输入。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetInput {
+    /// 输入提示前的内容（如警告信息）
+    pub pre_content: Option<String>,
+    /// pre_content 的前景色
+    #[serde(default = "default_prompt_fg")]
+    pub pre_fg: String,
+    /// 输入提示符文本（如 "confirm (y/n) > "）
+    pub input_prompt: String,
+    /// 输入提示符前景色
+    #[serde(default = "default_prompt_fg")]
+    pub input_fg: String,
+}
+
+/// prompt_fg 等颜色字段的默认值
+fn default_prompt_fg() -> String {
+    "gray".to_string()
 }
 
 /// 主程序广播消息
@@ -219,6 +281,9 @@ mod tests {
             is_print: true,
             to_exec: vec!["ls -la".to_string()],
             exec_result: None,
+            prompt_fg: "gray".to_string(),
+            get_input: None,
+            user_input: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: PluginResponse = serde_json::from_str(&json).unwrap();
@@ -239,6 +304,9 @@ mod tests {
             is_print: false,
             to_exec: vec!["echo hello".to_string()],
             exec_result: Some(vec!["hello".to_string()]),
+            prompt_fg: "gray".to_string(),
+            get_input: None,
+            user_input: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: PluginResponse = serde_json::from_str(&json).unwrap();
@@ -252,6 +320,7 @@ mod tests {
             to_exec: vec![],
             out_content: "done".to_string(),
             out_prompt: Some("@agent #>>".to_string()),
+            prompt_fg: "gray".to_string(),
             is_print: true,
         };
         let json = serde_json::to_string(&off).unwrap();
@@ -267,6 +336,7 @@ mod tests {
             to_exec: vec!["echo cleanup".to_string()],
             out_content: String::new(),
             out_prompt: None,
+            prompt_fg: "gray".to_string(),
             is_print: false,
         };
         let json = serde_json::to_string(&off).unwrap();
@@ -319,6 +389,9 @@ mod tests {
                 is_print: true,
                 to_exec: vec![],
                 exec_result: None,
+                prompt_fg: "gray".to_string(),
+                get_input: None,
+                user_input: None,
             },
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -334,6 +407,7 @@ mod tests {
                 to_exec: vec![],
                 out_content: "done".to_string(),
                 out_prompt: Some("@agent #>>".to_string()),
+                prompt_fg: "gray".to_string(),
                 is_print: true,
             },
         };
@@ -378,6 +452,9 @@ mod tests {
                 is_print: true,
                 to_exec: vec!["echo done".to_string()],
                 exec_result: Some(vec!["done".to_string()]),
+                prompt_fg: "gray".to_string(),
+                get_input: None,
+                user_input: None,
             },
         };
 
@@ -432,6 +509,9 @@ mod tests {
             is_print: false,
             to_exec: vec![],
             exec_result: None,
+            prompt_fg: "gray".to_string(),
+            get_input: None,
+            user_input: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("\"to_exec\":[]"));

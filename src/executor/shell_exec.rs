@@ -3,6 +3,8 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
+use std::io::Write;
+
 use crate::error::NashellError;
 
 /// 捕获命令执行的结果。
@@ -212,7 +214,190 @@ pub fn exec_cd(args: &[String]) -> Result<(), NashellError> {
     })
 }
 
-/// 直连终端执行 shell 命令（不捕获输出）。
+/// 流式捕获执行 shell 命令——实时输出到终端同时收集全部输出。
+///
+/// 与 `exec_captured` 使用相同的 `script -c` 机制，但不等子进程结束才返回。
+/// 而是在后台线程逐块读取 stdout，同步写入终端和缓冲区。
+/// 适合 toExec 的单条 Shell 命令：既能实时可见，又能将完整输出返回给插件。
+///
+/// # 参数
+/// - `cmd`: 命令名
+/// - `args`: 命令参数
+/// - `shell_type`: shell 类型
+/// - `timeout_secs`: 超时秒数
+pub fn exec_captured_streaming(
+    cmd: &str,
+    args: &[String],
+    shell_type: &str,
+    timeout_secs: u64,
+) -> Result<CapturedOutput, NashellError> {
+    let mut full_cmd = cmd.to_string();
+    for arg in args {
+        full_cmd.push(' ');
+        full_cmd.push_str(arg);
+    }
+
+    let inner_cmd = format!("{} -c {}", shell_type, shell_quote(&full_cmd));
+
+    let mut child = Command::new("script")
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .arg("-e")
+        .arg("-q")
+        .arg("-c")
+        .arg(&inner_cmd)
+        .arg("/dev/null")
+        .env("TERM", "xterm-256color")
+        .spawn()
+        .map_err(|e| NashellError::Io {
+            path: Some("script".to_string()),
+            source: e,
+        })?;
+
+    let child_stdout = child.stdout.take().ok_or_else(|| NashellError::Io {
+        path: Some(cmd.to_string()),
+        source: std::io::Error::new(std::io::ErrorKind::BrokenPipe, "stdout pipe missing"),
+    })?;
+    let child_stderr = child.stderr.take().ok_or_else(|| NashellError::Io {
+        path: Some(cmd.to_string()),
+        source: std::io::Error::new(std::io::ErrorKind::BrokenPipe, "stderr pipe missing"),
+    })?;
+
+    let child_pid = child.id();
+    let label = full_cmd.clone();
+
+    // 读 stdout 线程：逐块写入终端 + 累积缓冲区
+    let (tx, rx) = mpsc::channel::<Result<Vec<u8>, std::io::Error>>();
+    thread::spawn(move || {
+        use std::io::Read;
+        let mut reader = std::io::BufReader::new(child_stdout);
+        let mut terminal = std::io::stdout();
+        let mut buf = [0u8; 8192];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let chunk = buf[..n].to_vec();
+                    let _ = terminal.write_all(&chunk);
+                    let _ = terminal.flush();
+                    tx.send(Ok(chunk)).ok();
+                }
+                Err(e) => {
+                    tx.send(Err(e)).ok();
+                    break;
+                }
+            }
+        }
+    });
+
+    // 读 stderr 线程
+    let (tx_err, rx_err) = mpsc::channel::<Result<Vec<u8>, std::io::Error>>();
+    thread::spawn(move || {
+        use std::io::Read;
+        let mut reader = std::io::BufReader::new(child_stderr);
+        let mut terminal = std::io::stdout();
+        let mut buf = [0u8; 8192];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let chunk = buf[..n].to_vec();
+                    let _ = terminal.write_all(&chunk);
+                    let _ = terminal.flush();
+                    tx_err.send(Ok(chunk)).ok();
+                }
+                Err(e) => {
+                    tx_err.send(Err(e)).ok();
+                    break;
+                }
+            }
+        }
+    });
+
+    // 收集输出
+    let mut stdout_buf = Vec::new();
+    let mut stderr_buf = Vec::new();
+    let start = std::time::Instant::now();
+    let timeout_dur = Duration::from_secs(if timeout_secs > 0 { timeout_secs } else { u64::MAX });
+
+    let mut stdout_done = false;
+    let mut stderr_done = false;
+
+    while !stdout_done || !stderr_done {
+        if start.elapsed() > timeout_dur {
+            let pid = child_pid as i32;
+            unsafe {
+                libc::kill(pid, libc::SIGTERM);
+                thread::sleep(Duration::from_millis(500));
+                libc::kill(pid, libc::SIGKILL);
+            }
+            let _ = child.wait();
+            return Err(NashellError::Timeout {
+                command: label,
+                seconds: timeout_secs,
+            });
+        }
+
+        if !stdout_done {
+            match rx.try_recv() {
+                Ok(Ok(chunk)) => stdout_buf.extend_from_slice(&chunk),
+                Ok(Err(_)) => stdout_done = true,
+                Err(mpsc::TryRecvError::Disconnected) => stdout_done = true,
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        if !stderr_done {
+            match rx_err.try_recv() {
+                Ok(Ok(chunk)) => stderr_buf.extend_from_slice(&chunk),
+                Ok(Err(_)) => stderr_done = true,
+                Err(mpsc::TryRecvError::Disconnected) => stderr_done = true,
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+
+        // 检查子进程是否已退出（两个 channel 都断开意味着线程已结束）
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                // 进程已退出，等待 channel 排空
+                // Drain remaining
+                while let Ok(Ok(chunk)) = rx.try_recv() {
+                    stdout_buf.extend_from_slice(&chunk);
+                }
+                while let Ok(Ok(chunk)) = rx_err.try_recv() {
+                    stderr_buf.extend_from_slice(&chunk);
+                }
+                let exit_code = status.code().unwrap_or(-1);
+                return Ok(CapturedOutput {
+                    stdout: String::from_utf8_lossy(&stdout_buf).to_string(),
+                    stderr: String::from_utf8_lossy(&stderr_buf).to_string(),
+                    exit_code,
+                });
+            }
+            Ok(None) => {}
+            Err(e) => {
+                return Err(NashellError::Io {
+                    path: Some("script".to_string()),
+                    source: e,
+                });
+            }
+        }
+
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    // Channel done, wait for process
+    let status = child.wait().map_err(|e| NashellError::Io {
+        path: Some("script".to_string()),
+        source: e,
+    })?;
+    let exit_code = status.code().unwrap_or(-1);
+    Ok(CapturedOutput {
+        stdout: String::from_utf8_lossy(&stdout_buf).to_string(),
+        stderr: String::from_utf8_lossy(&stderr_buf).to_string(),
+        exit_code,
+    })
+}
 ///
 /// stdin/stdout/stderr 全部继承自父进程，子进程直接读写真实终端。
 /// 适用于无管道、无异步、非 Bash 快捷方式的单一命令——
