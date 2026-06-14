@@ -27,8 +27,7 @@
   ├── executor/
   │   ├── mod.rs                    # 执行引擎分派
   │   ├── shell_exec.rs             # Shell 命令执行
-  │   ├── nacommand_exec.rs         # NaCommand 执行
-  │   ├── interactive_exec.rs       # 交互命令执行
+  │   ├── async_exec.rs             # 异步执行
   │   └── pipeline_orch.rs          # 管道编排
   ├── nacommand/
   │   ├── mod.rs                    # NaCommand 模块入口
@@ -183,8 +182,6 @@ pub struct RawCmd {
 pub enum CmdType {
     /// 普通 shell 命令（无特殊前缀）
     Shell,
-    /// 交互式命令（!cmd 前缀）
-    Interactive,
     /// 普通 NaCommand（!@Cmd: 前缀）
     NaCommandNormal,
     /// 系统级 NaCommand（!!@Cmd: 前缀）
@@ -451,12 +448,11 @@ pub struct PluginsConfig {
 │  should_use_direct()  │
 └──────┬───────┬───────┘
        │       │
-  直连模式   Captured 模式
+   直连模式   Captured 模式
        │       │
        ▼       ▼
 ┌──────────┐ ┌──────────────────┐
 │dispatch  │ │ dispatch()       │
-│_direct() │ │ 遍历 RawCmd 逐段  │
 │          │ │ 管道前段输出→后段  │
 │{shell}   │ │                  │
 │ -c exec  │ │ script -e -q -c  │
@@ -534,7 +530,7 @@ Rust Command → script -e -q -c "bash -c '{args}'" /dev/null
 #### 执行分派
 
 REPL 循环通过 `should_use_direct()` 判定模式：
-- 直连模式 → `dispatch_direct()`（仅 Shell/Interactive 类型）
+- 直连模式 → `dispatch_direct()`（仅 Shell 类型）
 - Captured 模式 → `dispatch()`（所有类型，管道逐段执行）
 
 实现文件：
@@ -687,13 +683,11 @@ pub const DEFAULT_PLUGINS_DIR: &str = ".config/nashell/plugins";
 
 5. **`!!@Bash:` 的 `@/Async`**：Bash 命令检测发生在所有其他解析之前。`!!@Bash:` 和其后的 `@/Async(name)` 同时被 Bash 处理器消费，不经过常规的 `@/Async` 检测阶段。
 
-6. **`!cmd` 的 sudo 处理**：先通过 PTY 执行 `sudo -v`（刷新 sudo 时间戳），然后 exec 带 sudo 的目标交互程序。
+6. **错误显示格式**：所有错误输出统一为 `@Error #>>\n{错误类型}: {描述}` 格式，红色前景色。
 
-7. **错误显示格式**：所有错误输出统一为 `@Error #>>\n{错误类型}: {描述}` 格式，红色前景色。
+7. **配置文件缺失处理**：若 `~/.config/nashell/config.kdl` 不存在，使用内置默认值启动，不报错。若存在但解析失败，报告解析错误但继续使用默认值启动。
 
-8. **配置文件缺失处理**：若 `~/.config/nashell/config.kdl` 不存在，使用内置默认值启动，不报错。若存在但解析失败，报告解析错误但继续使用默认值启动。
-
-9. **Mode 提取规则——查表法**：NaCommand 本质上是"调用格式特殊的 CLI 工具"。mode 的判定标准是**有表查表**：
+8. **Mode 提取规则——查表法**：NaCommand 本质上是"调用格式特殊的 CLI 工具"。mode 的判定标准是**有表查表**：
    - 每条命令在 `CmdMeta.known_modes` 中声明自己的已知模式列表（小写）。
    - `build_nacommand` 将 `args[0]` 与该命令的 `known_modes` 做大小写不敏感的匹配：
      - 匹配成功 → 提取为 `NaCommand.mode`，从 `args` 中移除。
@@ -701,6 +695,6 @@ pub const DEFAULT_PLUGINS_DIR: &str = ".config/nashell/plugins";
    - **外部配置命令和插件命令**：`known_modes` 为空，不做查表，args 原样透传。这些命令在各自的程序/插件内部自行查表处理 mode。
    - 例如：Write 的 `known_modes = ["help"]`，`!@Write:Help` → mode="help"（提取）；`!@Write:./test.txt` → mode=None, args=["./test.txt"]（不提取）。
 
-10. **大小写匹配**：所有 NaCommand 命令名和模式名在匹配时统一转小写。用户输入 `Open`、`OPEN`、`open` 均匹配为 `open`。
+9. **大小写匹配**：所有 NaCommand 命令名和模式名在匹配时统一转小写。用户输入 `Open`、`OPEN`、`open` 均匹配为 `open`。
 
-11. **exec_script 临时文件**：临时脚本文件创建在 `/tmp/nashell/` 下，文件名包含随机串避免冲突。执行结束后无论成功与否都删除。
+10. **exec_script 临时文件**：临时脚本文件创建在 `/tmp/nashell/` 下，文件名包含随机串避免冲突。执行结束后无论成功与否都删除。

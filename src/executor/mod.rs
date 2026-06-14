@@ -1,9 +1,13 @@
+pub mod async_exec;
 pub mod shell_exec;
+
+use std::sync::{Arc, Mutex};
 
 use crate::error::NashellError;
 use crate::parser::syntax::{CmdType, RawCmd};
 use crate::nacommand::cmd::{NaCommand, NaLevel};
 use crate::nacommand::registry::CommandRegistry;
+use crate::shell::manager::ShellManager;
 
 /// 命令输出的类型标识。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -30,6 +34,8 @@ pub struct ExecContext {
     pub long_argument: Option<String>,
     /// 命令注册表
     pub registry: Option<CommandRegistry>,
+    /// Shell 管理器（用于 Shell 管理命令和异步执行）
+    pub shell_manager: Option<Arc<Mutex<ShellManager>>>,
 }
 
 /// 检查命令是否匹配安全拦截模式。
@@ -162,11 +168,6 @@ pub fn dispatch(cmd: &RawCmd, ctx: &mut ExecContext) -> Result<(String, OutputTy
                 Ok((msg, OutputType::Shell))
             }
         }
-        CmdType::Interactive => Err(NashellError::Execute {
-            command: cmd.cmd.clone(),
-            exit_code: None,
-            stderr: "交互命令执行将在 Phase 7 实现".to_string(),
-        }),
         CmdType::NaCommandSystem if cmd.cmd == "bash" => {
             // !!@Bash: 命令 — 通过 bash -c 执行
             let bash_args = cmd.args.first().cloned().unwrap_or_default();
@@ -192,6 +193,8 @@ pub fn dispatch(cmd: &RawCmd, ctx: &mut ExecContext) -> Result<(String, OutputTy
                 &nacmd,
                 ctx.pre_out.clone(),
                 registry,
+                ctx.shell_manager.clone(),
+                ctx.timeout_secs,
             )?;
             Ok((output, OutputType::NaCommand))
         }
@@ -201,7 +204,7 @@ pub fn dispatch(cmd: &RawCmd, ctx: &mut ExecContext) -> Result<(String, OutputTy
 /// 直连终端模式执行（不捕获输出）。
 ///
 /// 适用于：单一命令、无管道、无 @/Async、非 !!@Bash:。
-/// Shell/Interactive 命令通过 `exec_shell_direct` 直连终端执行，
+/// Shell 命令通过 `exec_shell_direct` 直连终端执行，
 /// 子进程 stdin/stdout/stderr 全部继承，支持实时输出和交互输入。
 /// `cd` 仍由 Rust 进程拦截处理以保持目录状态。
 /// NaCommand 命令回退到 captured 模式。
@@ -215,10 +218,6 @@ pub fn dispatch_direct(cmd: &RawCmd, shell_type: &str) -> Result<(), NashellErro
             if cmd.cmd == "cd" && cmd.args.len() <= 1 {
                 return shell_exec::exec_cd(&cmd.args);
             }
-            shell_exec::exec_shell_direct(&cmd.cmd, &cmd.args, shell_type)?;
-            Ok(())
-        }
-        CmdType::Interactive => {
             shell_exec::exec_shell_direct(&cmd.cmd, &cmd.args, shell_type)?;
             Ok(())
         }
@@ -250,6 +249,7 @@ mod tests {
             deny_patterns: Vec::new(),
             long_argument: None,
             registry: None,
+            shell_manager: None,
         }
     }
 
@@ -282,18 +282,6 @@ mod tests {
             std::path::PathBuf::from("/tmp")
         );
         std::env::set_current_dir(&old).ok();
-    }
-
-    #[test]
-    fn test_dispatch_interactive_not_implemented() {
-        let cmd = RawCmd {
-            cmd_type: CmdType::Interactive,
-            cmd: "vim".to_string(),
-            args: vec![],
-        };
-        let mut ctx = test_ctx();
-        let result = dispatch(&cmd, &mut ctx);
-        assert!(result.is_err());
     }
 
     #[test]

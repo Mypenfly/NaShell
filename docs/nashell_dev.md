@@ -35,11 +35,11 @@ NaShell 主进程
 │   ├── 提示符渲染 (ANSI 彩色)
 │   └── 历史管理
 ├── 命令解析器
-│   ├── 词法分析: 识别 !@ / !!@ / !cmd / @/ / 管道 / 引号字符串
+│   ├── 词法分析: 识别 !@ / !!@ / @/ / 管道 / 引号字符串
 │   ├── 语法分析: 构建 RawCommands → Vec<RawCmd>
 │   └── long_argument 提取 (优先 @/, 次选空行)
 ├── 命令分发与执行引擎
-│   ├── 直连模式 (should_use_direct): Shell/Interactive 命令 → Stdio::inherit 直连终端
+│   ├── 直连模式 (should_use_direct): Shell 命令 → Stdio::inherit 直连终端
 │   │   └── cd 命令由 Rust 进程直接拦截 (std::env::set_current_dir)
 │   ├── Captured 模式: 管道/异步/Bash → script -e -q -c 捕获执行
 │   │   ├── 普通 Shell 命令 → exec_captured (shell -c wrapped by script PTY)
@@ -94,7 +94,7 @@ NaShell 主进程
 ```
 没有多行的提示符，只有首行的单独标识
 
-6. 在命令输入中除了使用了 `NaCommand` 和交互命令之外的语句/内容都作为 Shell 命令执行
+6. 在命令输入中除了使用了 `NaCommand` 之外的语句/内容都作为 Shell 命令执行
 
 7. 命令执行策略（双模式）：
 
@@ -160,15 +160,7 @@ NaShell 主进程
 - 将整个命令段（包括后续内容）作为 bash -c 的参数执行，捕获输出
 - 不接受管道传递的 pre_out（因为 Bash 命令本身就是一个完整的 bash 语句）
 
-**类型 B：`!cmd` 交互命令（如 `!vim`, `!hx`）**
-- 检查是否有管道 `|` 或重定向，若有则拒绝执行并报错
-- 检查是否含 `!!@` 或 `!@` NaCommand 标记，若有则报错
-- 若通过了 `sudo` 前置 → 特殊处理：提取 sudo 部分，先通过 PTY 执行 sudo，再 exec 交互程序
-- 若有 alias 定义 → 按配置展开别名后再判断（展开后的命令也可能变成交互命令）
-- 最终调用 exec 执行，接管终端
-- **不支持异步**：若阶段 2 检测到 `@/Async`，交互命令直接报错
-
-**类型 C：`!!@NaCommand:` 或 `!@NaCommand:`（NaCommand）**
+**类型 B：`!!@NaCommand:` 或 `!@NaCommand:`（NaCommand）**
 - 提取命令名 `NaCommand` 和可选的子命令/模式（`NaCommand:Mode` 格式）
 - 解析命令行参数（`-q "..." -c 10` 等选项参数）
 - 在 `AppData` 中查表：先查内置命令 → 再查用户配置的 external 命令 → 再查插件注册的命令
@@ -177,7 +169,7 @@ NaShell 主进程
 - 执行并捕获输出，传递给下一个管道段或最终打印
 - 若查表失败（命令未注册），报错 `未知的 NaCommand: xxx`
 
-**类型 D：普通 Shell 命令段**
+**类型 C：普通 Shell 命令段**
 - 若整个管道链中没有任何 NaCommand → 直接在 main PTY 中交互执行，实时输出
 - 若管道链中有 NaCommand → 通过 `nu -c` / `bash -c` 静默捕获输出，传递给下一个命令段
 
@@ -218,17 +210,15 @@ NaShell 主进程
     ///参数
     args:Vec<String>,
   }
-  ///命令类型枚举
-  enum CmdType {
-    ///一般的Shell命令没有任何特殊标识
-    Shell,
-    ///交互式命令，!cmd
-    Interactive,
-    ///普通的NaCommand,!@NaCommand
-    NaCommandNormal,
-    ///系统级的NaCommand,!!@NaCommand
-    NaCommandSystem
-  }
+   ///命令类型枚举
+   enum CmdType {
+     ///一般的Shell命令没有任何特殊标识
+     Shell,
+     ///普通的NaCommand,!@NaCommand
+     NaCommandNormal,
+     ///系统级的NaCommand,!!@NaCommand
+     NaCommandSystem
+   }
 ```
 
 ## Shell 命令执行（直连 / Captured 双模式）
@@ -244,7 +234,6 @@ Rust Command → {shell} -c '{command}'  (stdio 全部 inherit)
 - stdin/stdout/stderr 全部继承自父进程，子进程直接读写真实终端
 - 适用于 **实时输出**（curl 进度、git clone 百分比）和 **交互式输入**（python REPL、read、TUI）
 - `cd` 命令由 Rust 进程拦截，不经过此路径
-- `!cmd` 语法降级为可选项：普通 shell 命令也能直接运行 vim、htop 等 TUI 程序
 
 ### Captured 模式（`exec_captured`）
 
@@ -326,24 +315,20 @@ Rust Command → script -e -q -c "{shell} -c '{command}'" /dev/null
 
 > 对于 main Shell 说是异步的，但实际上它的执行会阻塞主线程，这是设计不是缺陷，之所以设计成异步是为了 Switch 逻辑处理方便以及持久的、独立的 Shell 环境。
 
-## `!cmd` 交互命令
+## Alias 命令别名
 
-没有特别之处，只要检查过关（无管道、无 NaCommand 混用），使用交互命令时直接 exec 执行并接管终端。
-
-需要注意的两点：
-- `sudo !hx` 这种提权执行需特殊处理：提取 sudo 后通过 PTY 执行 sudo 提权，再 exec 目标程序
-- alias 展开：若配置中定义了 `shx = "sudo hx --config ~/helix"`，则 `!shx` 先展开为 `sudo hx --config ~/helix`，然后再按交互命令逻辑处理（alias 展开后符合交互命令条件即可）
+alias 配置允许用户为常用命令定义简写。展开逻辑为简单的首词替换（首词匹配则替换为 alias 值，保留后续参数）。
 
 **alias 配置格式**（在 config.kdl 中）：
 ```kdl
 alias {
-    shx "sudo hx --config ~/helix"
-    sconf "sudo nvim ~/.config/nvim/init.lua"
-    // alias 的值直接作为命令文本替换 !alias_name
+    ll "ls -la"
+    gst "git status"
+    // alias 的值直接作为命令文本替换
 }
 ```
 
->这类命令不支持异步执行，也即遇到 @/Async 会直接抛出报错
+> alias 展开在解析之前执行，对所有类型的命令生效
 
 ## `NaCommand`
 
@@ -838,7 +823,6 @@ enum Level { Normal, System }
   → [解析器] → RawCommands { commands: Vec<RawCmd>, long_argument, pre_out, is_async }
     → [分派器] 遍历 RawCmd:
       - CmdType::Shell → ShellCmd::ExecPty / ShellCmd::ExecCaptured → ShellActor (PTY)
-      - CmdType::Interactive → exec 子进程 (接管终端)
       - CmdType::NaCommandNormal / NaCommandSystem → 查 AppData → 执行
         → 内置: 直接调用对应 handler
         → 外部配置: 调用 exec 程序
@@ -888,10 +872,7 @@ NaCommands {
 // ===== 命令别名 =====
 alias {
     // 格式：<别名> "<展开后的命令>"
-    // 用于 !cmd 交互命令的别名展开
-    shx "sudo hx --config ~/helix"
-    sconf "sudo nvim ~/.config/nvim/init.lua"
-    // 普通别名也支持
+    // 普通别名
     ll "ls -la"
     gst "git status"
 }
@@ -937,9 +918,6 @@ plugins {
 | 错误场景 | 处理方式 |
 |----------|---------|
 | 引号未闭合（如 `"hello world`） | 报错并提示：缺少闭合引号 |
-| `!cmd` 与管道混用 | 报错并拒绝执行 |
-| `!cmd` 与 NaCommand 混用 | 报错并拒绝执行 |
-| `!cmd` 与 `@/Async` 混用 | 报错：交互命令不支持异步执行 |
 | NaCommand 未知（查表失败） | 报错：`未知的 NaCommand: {name}` |
 | NaCommand 缺少必要参数 | 报错并显示该命令的 help 信息 |
 | 配置文件解析失败 | 显示错误位置，使用默认配置继续启动 |

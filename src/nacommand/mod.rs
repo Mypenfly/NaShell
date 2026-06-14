@@ -2,30 +2,35 @@ pub mod cmd;
 pub mod registry;
 pub mod builtin;
 
+use std::sync::{Arc, Mutex};
+
 use crate::error::NashellError;
 use crate::nacommand::cmd::NaCommand;
 use crate::nacommand::registry::CommandRegistry;
+use crate::shell::manager::ShellManager;
 
 /// 执行 NaCommand。
 ///
 /// 查表找到对应的命令处理器并执行。
 /// 当 mode 为 "help" 时返回帮助信息。
-/// 当前支持的内置命令：write, open。
+/// 当前支持的内置命令：write, open, bash, shell。
 ///
 /// # 参数
 /// - `cmd`: NaCommand 数据结构
-/// - `pre_out`: 管道前一级的输出（用于管道传递，当前未使用）
+/// - `pre_out`: 管道前一级的输出（用于管道传递）
 /// - `registry`: 命令注册表
+/// - `shell_manager`: Shell 管理器（用于 Shell 管理命令，可选）
+/// - `timeout_secs`: 命令超时秒数（用于 Bash 命令）
 ///
 /// # 返回
 /// - `Ok(String)`: 命令执行结果
 /// - `Err(NashellError)`: 命令未找到或执行错误
 pub fn execute_nacommand(
     cmd: &NaCommand,
-    _pre_out: Option<String>,
-    // TODO: 管道中段 NaCommand 应使用 pre_out 作为输入内容
-    //       当前 Write/Open 不需要此功能，Phase 6+ 的 Bash/Shell 命令需要
+    pre_out: Option<String>,
     registry: &CommandRegistry,
+    shell_manager: Option<Arc<Mutex<ShellManager>>>,
+    timeout_secs: u64,
 ) -> Result<String, NashellError> {
     let lower_cmd = cmd.cmd.to_lowercase();
 
@@ -44,6 +49,23 @@ pub fn execute_nacommand(
                 return registry.get_help("open", Some("help"));
             }
             builtin::open::execute_open(cmd)
+        }
+        "bash" => {
+            if cmd.mode.as_deref().map_or(false, |m| m == "help") {
+                return registry.get_help("bash", Some("help"));
+            }
+            builtin::bash::execute_bash(cmd, pre_out, timeout_secs)
+        }
+        "shell" => {
+            if cmd.mode.as_deref().map_or(false, |m| m == "help") {
+                return registry.get_help("shell", Some("help"));
+            }
+            let mgr = shell_manager.ok_or_else(|| NashellError::Execute {
+                command: cmd.cmd.clone(),
+                exit_code: None,
+                stderr: "ShellManager 未初始化".to_string(),
+            })?;
+            builtin::shell_cmd::execute_shell_cmd(cmd, &mgr)
         }
         _ => Err(NashellError::CommandNotFound {
             name: cmd.cmd.clone(),
@@ -126,7 +148,7 @@ mod tests {
             long_argument: Some("hello from execute".to_string()),
         };
 
-        let result = execute_nacommand(&cmd, None, &registry).unwrap();
+        let result = execute_nacommand(&cmd, None, &registry, None, 120).unwrap();
         assert!(result.contains("write to"));
         assert!(result.contains("bytes"));
 
@@ -151,7 +173,7 @@ mod tests {
             long_argument: None,
         };
 
-        let result = strip_ansi(&execute_nacommand(&cmd, None, &registry).unwrap());
+        let result = strip_ansi(&execute_nacommand(&cmd, None, &registry, None, 120).unwrap());
         assert!(result.contains("1  line 1"));
         assert!(result.contains("2  line 2"));
     }
@@ -168,7 +190,7 @@ mod tests {
             long_argument: None,
         };
 
-        let result = execute_nacommand(&cmd, None, &registry).unwrap();
+        let result = execute_nacommand(&cmd, None, &registry, None, 120).unwrap();
         assert!(result.contains("Write"));
         assert!(result.contains("写入文件"));
     }
@@ -185,7 +207,7 @@ mod tests {
             long_argument: None,
         };
 
-        let result = execute_nacommand(&cmd, None, &registry);
+        let result = execute_nacommand(&cmd, None, &registry, None, 120);
         assert!(result.is_err());
         match result {
             Err(NashellError::CommandNotFound { name }) => {
@@ -209,7 +231,7 @@ mod tests {
             long_argument: Some("case insensitive".to_string()),
         };
 
-        let result = execute_nacommand(&cmd, None, &registry).unwrap();
+        let result = execute_nacommand(&cmd, None, &registry, None, 120).unwrap();
         assert!(result.contains("write to"));
     }
 
@@ -225,7 +247,7 @@ mod tests {
             long_argument: None,
         };
 
-        let result = execute_nacommand(&cmd, None, &registry).unwrap();
+        let result = execute_nacommand(&cmd, None, &registry, None, 120).unwrap();
         assert!(result.contains("Open"));
         assert!(result.contains("打开文件"));
     }

@@ -10,12 +10,6 @@ mod tests {
     }
 
     #[test]
-    fn test_cmd_type_interactive() {
-        let ct = CmdType::Interactive;
-        assert!(matches!(ct, CmdType::Interactive));
-    }
-
-    #[test]
     fn test_cmd_type_nacommand_normal() {
         let ct = CmdType::NaCommandNormal;
         assert!(matches!(ct, CmdType::NaCommandNormal));
@@ -89,8 +83,6 @@ mod tests {
 pub enum CmdType {
     /// 普通 shell 命令（无特殊前缀）
     Shell,
-    /// 交互式命令（!cmd 前缀）
-    Interactive,
     /// 普通 NaCommand（!@Cmd: 前缀）
     NaCommandNormal,
     /// 系统级 NaCommand（!!@Cmd: 前缀）

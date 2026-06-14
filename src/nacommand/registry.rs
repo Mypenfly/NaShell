@@ -76,7 +76,7 @@ impl CommandRegistry {
             }
         }
 
-        // TODO: Phase 9+ 查 config_cmds, Phase 8+ 查 plugins[*].commands
+        // TODO: Phase 8+ 查 config_cmds, Phase 7+ 查 plugins[*].commands
 
         Err(NashellError::CommandNotFound {
             name: cmd_name.to_string(),
@@ -136,6 +136,41 @@ impl CommandRegistry {
                     style_note("注意:")
                 ),
             );
+            m.insert(
+                "bash".to_string(),
+                format!(
+                    "{}\n  使用 bash 执行命令。\n\n  {}  \
+                     !!@Bash: 的优先级最高，跳过所有其他解析规则。\n  \
+                     支持 @/Async(name) 异步执行（创建临时 bash 子进程）。\n\n  {}  \
+                     \n    {}\n\n  {}  \
+                     输出使用亮黄色 Bash: 标识。",
+                    style_cmd_name("Bash"),
+                    style_section("特点:"),
+                    style_section("使用示例:"),
+                    style_code("!!@Bash: ls -la"),
+                    style_note("注意:")
+                ),
+            );
+            m.insert(
+                "shell".to_string(),
+                format!(
+                    "{}\n  管理 NaShell 内部的 Shell 线程。\n\n  {}  \
+                     \n    Shell:           列出所有 Shell 状态\n    \
+                     Shell:Watch      查看指定 shell 的 pools（-i id [-c count]）\n    \
+                     Shell:Destroy    销毁指定 shell（-i id）\n    \
+                     Shell:Switch     切换 main shell（-i id [-d]）\n\n  {}  \
+                     \n    {}\n    {}\n    {}\n    {}\n\n  {}  \
+                     Shell 命令通过 id 定位目标 shell，id 由系统自动分配。",
+                    style_cmd_name("Shell"),
+                    style_section("模式:"),
+                    style_section("使用示例:"),
+                    style_code("!!@Shell:"),
+                    style_code("!!@Shell:Watch -i abc123 -c 3"),
+                    style_code("!!@Shell:Destroy -i abc123"),
+                    style_code("!!@Shell:Switch -i abc123 -d"),
+                    style_note("注意:")
+                ),
+            );
             m
         };
 
@@ -148,8 +183,8 @@ impl CommandRegistry {
             }
         }
 
-        // TODO: Phase 9+ 外部命令 help 透传 --help
-        // TODO: Phase 8+ 插件命令 help call
+        // TODO: Phase 8+ 外部命令 help 透传 --help
+        // TODO: Phase 7+ 插件命令 help call
 
         Err(NashellError::CommandNotFound {
             name: cmd_name.to_string(),

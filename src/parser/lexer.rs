@@ -11,8 +11,6 @@ pub enum Token {
     SystemPrefix,
     /// !@ 普通 NaCommand 前缀
     NormalPrefix,
-    /// ! 交互命令前缀
-    InteractivePrefix,
     /// 管道符号 |
     Pipe,
     /// 词（命令名、参数、值）
@@ -183,13 +181,6 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, NashellError> {
             continue;
         }
 
-        // 检查 ! 交互前缀（不在 !!@ 或 !@ 之后）
-        if c == '!' && !(i + 1 < len && chars[i + 1] == '@') {
-            tokens.push(Token::InteractivePrefix);
-            i += 1;
-            continue;
-        }
-
         // 检查 @/ 截止符和 @/Async(name)
         if c == '@' && i + 1 < len && chars[i + 1] == '/' {
             let rest = &input[i..];
@@ -340,16 +331,6 @@ mod tests {
             Token::Word("abc".to_string()),
             Token::Word("-c".to_string()),
             Token::Word("3".to_string()),
-        ]);
-    }
-
-    #[test]
-    fn test_tokenize_interactive() {
-        let tokens = tokenize("!vim test.txt").unwrap();
-        assert_eq!(tokens, vec![
-            Token::InteractivePrefix,
-            Token::Word("vim".to_string()),
-            Token::Word("test.txt".to_string()),
         ]);
     }
 

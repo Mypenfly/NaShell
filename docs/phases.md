@@ -268,7 +268,7 @@
 
 2. ✅ **更新 `src/executor/mod.rs`**
    - `dispatch()`: Captured 模式分派（管道 / 异步 / Bash）
-   - `dispatch_direct()`: 直连模式分派（Shell / Interactive 直接执行，cd 拦截）
+   - `dispatch_direct()`: 直连模式分派（Shell 直接执行，cd 拦截）
    - `check_safety()`: 安全模式匹配（pub(crate) 供 REPL 层调用）
    - `ExecContext` 包含 shell_type、pre_out、timeout_secs、deny_patterns
 
@@ -318,13 +318,11 @@
 
 3. **安全检查已就位**：`check_safety()` 为 `pub(crate)`，REPL 层在直连模式下直接调用，`dispatch()` 在 Captured 模式内调用。后续添加新命令类型时，确保安全检查不被绕过。
 
-4. **`!cmd` 的降级**：由于直连模式下普通 shell 命令也能接管终端（TUI/vim 等），`!cmd` 语法的必要性已大幅降低。Phase 7 的交互命令 still 可以保留 `!cmd` 作为语法糖（alias 展开、安全区分），但不是必须的。
+4. **`shell_type_fg` 默认值**：已从 `"cyan"` 改为 `"blue"`，与 `nashell_dev.md` 配置示例一致。
 
-5. **`shell_type_fg` 默认值**：已从 `"cyan"` 改为 `"blue"`，与 `nashell_dev.md` 配置示例一致。
+5. **持久 PTY 代码保留**：`src/shell/pty.rs` 的持久 PTY 实现（`spawn_pty_session`、`send_command`）完整保留，仅在测试中调用。Phase 6 异步 Shell 可能复用它（但目前打算用一次性 bash 子进程）。
 
-6. **持久 PTY 代码保留**：`src/shell/pty.rs` 的持久 PTY 实现（`spawn_pty_session`、`send_command`）完整保留，仅在测试中调用。Phase 6 异步 Shell 可能复用它（但目前打算用一次性 bash 子进程）。
-
-7. **文件组织**：`executor/` 下 `shell_exec.rs` 集中了所有 shell 执行函数（captured/direct/bash/cd/timeout），符合 INSTRUCTION.md 1.1 规范。
+6. **文件组织**：`executor/` 下 `shell_exec.rs` 集中了所有 shell 执行函数（captured/direct/bash/cd/timeout），符合 INSTRUCTION.md 1.1 规范。
 
 ---
 
@@ -401,7 +399,7 @@
    - `build_nacommand` 将 `args[0]` 与 `known_modes` 做大小写不敏感匹配：命中 → 提取为 `NaCommand.mode`；未命中 → 保持为 `arg`。
    - **外部配置命令和插件命令** `known_modes` 为空 → 不做查表，args 原样透传，由其内部自行处理 mode。
 
-2. **`CmdMeta` 新增 `known_modes` 字段**：`Vec<String>` 类型。注册内置命令时必须填写。Phase 8-9 实现外部/插件命令时无需填写此字段。
+2. **`CmdMeta` 新增 `known_modes` 字段**：`Vec<String>` 类型。注册内置命令时必须填写。Phase 7-8 实现外部/插件命令时无需填写此字段。
 
 3. **`build_nacommand` 依赖 registry**：函数签名增加了 `registry: &CommandRegistry` 参数，用于查询命令的 `known_modes`。测试构造时需提供含正确 `known_modes` 的 registry。
 
@@ -414,10 +412,10 @@
 7. **`pre_out` 管道传递未使用**：`execute_nacommand` 接受 `pre_out: Option<String>` 参数但当前未消费（Phase 5 的 Write/Open 不需要）。Phase 6 的 Bash 命令和管道中段 NaCommand 需要正确使用此参数。代码中已添加 TODO 标记。
 
 8. **Open 命令 `--limit/-l` 重载行为**：
-   - 文件模式：`-l` 控制显示行数（与 spec 一致）
-   - 目录模式：`-l` 控制递归深度（默认 3，新增行为）
-   - `-s`/`-e` 对目录报错（与 spec 一致），`-l` 对目录合法
-   - `has_file_only_options` 仅检查 `-s`/`-e`，不再检查 `-l`
+    - 文件模式：`-l` 控制显示行数（与 spec 一致）
+    - 目录模式：`-l` 控制递归深度（默认 3，新增行为）
+    - `-s`/`-e` 对目录报错（与 spec 一致），`-l` 对目录合法
+    - `has_file_only_options` 仅检查 `-s`/`-e`，不再检查 `-l`
 
 9. **语法高亮使用 `syntect`**：依赖 `default-fancy` features，`SyntaxSet`/`ThemeSet` 通过 `OnceLock` 延迟加载并全局复用。测试中 `strip_ansi` 辅助函数用于移除 ANSI 码后进行断言。
 
@@ -477,48 +475,14 @@
 - `ls -la @/Async(test)` → 异步执行，立即返回确认，pools 中有结果
 - `!!@Bash: ls -la @/Async(back)` → Bash 异步执行
 
----
+### 额外完成项
 
-## Phase 7: 交互命令 + Alias
-
-**目标**：`!cmd` 交互命令可以接管终端执行，alias 解析生效。
-
-### 参考文档
-
-| 内容 | 位置 |
-|------|------|
-| 交互命令 | `nashell_dev.md` → !cmd 交互命令 |
-| Alias 配置 | `nashell_dev.md` → alias 配置格式 |
-| Alias 解析 | `INSTRUCTION.md` → 任务 6（config/alias.rs） |
-
-### 任务
-
-1. **创建 `src/executor/interactive_exec.rs`**
-   - `exec_interactive(cmd: &RawCmd, aliases: &HashMap<String, String>) -> Result<(), NashellError>`:
-     - 展开 alias（如果匹配）：`!shx` → `sudo hx --config ~/helix`
-     - 检查是否有管道/重定向，有则报错拒绝
-     - 检查是否含 `!!@` / `!@`，有则报错
-     - 若有 `sudo` 前缀：通过 PTY 执行 `sudo -v`，然后 exec 目标程序
-     - 若在 PTY 中：需要临时接管终端（通过 `SIGSTOP`/`SIGCONT` 协调）
-     - 退出后恢复 PTY 交互
-
-2. **更新 `src/config/alias.rs`**
-   - 完善 alias 展开：支持递归 alias（展开结果可匹配其他 alias，最多 5 层）
-   - 返回值类型 `Result<String, NashellError>`
-
-3. **更新 `src/executor/mod.rs`**
-   - `dispatch()` 完善 Interactive 分支
-
-### 验证
-- `!vim test.txt` → 打开 vim，退出后回到 NaShell
-- `!hx src/main.rs` → 打开 helix，退出后回到 NaShell
-- 配置 `shx="sudo hx --config ~/helix"`，输入 `!shx` → 执行 sudo helix
-- `!vim test.txt | grep foo` → 报错拒绝
-- `!vim test.txt @/Async(x)` → 报错拒绝
+- **`!cmd` 交互命令移除**：直连模式（Phase 4）已使普通 shell 命令能直接运行 vim/htop 等 TUI 程序，`!cmd` 前缀不再需要。`CmdType::Interactive` 已从代码中删除，相关文档已同步更新。
+- **Alias 别名系统**：`expandalias` 已实现首词替换式展开，在 REPL 解析前调用。对普通命令和 NaCommand 均生效。已满足当前需求，不单独设 Phase。
 
 ---
 
-## Phase 8: 插件系统
+## Phase 7: 插件系统
 
 **目标**：完整插件生命周期管理——加载、通信、执行、关闭。
 
@@ -585,7 +549,7 @@
 
 ---
 
-## Phase 9: 外部配置命令
+## Phase 8: 外部配置命令
 
 **目标**：用户在 `config.kdl` 中配置的 NaCommand 可正常调用。
 
@@ -621,7 +585,7 @@
 
 ---
 
-## Phase 10: 错误处理、信号处理与退出
+## Phase 9: 错误处理、信号处理与退出
 
 **目标**：所有错误路径覆盖完毕，信号处理健壮，退出清理完整。
 
@@ -671,7 +635,7 @@
 
 ---
 
-## Phase 11: 集成测试与打磨
+## Phase 10: 集成测试与打磨
 
 **目标**：端到端测试覆盖核心功能路径，边缘情况处理完善。
 
@@ -716,4 +680,4 @@
 ### 验证
 - `cargo test` 全部通过
 - `cargo clippy` 无警告
-- 所有 Phase 1~10 的验证项回归通过
+- 所有 Phase 1~9 的验证项回归通过

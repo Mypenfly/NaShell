@@ -22,7 +22,6 @@ fn parse_cmd_segment(segment: &str) -> Result<RawCmd, NashellError> {
     let (cmd_type, word_start) = match &tokens[0] {
         lexer::Token::SystemPrefix => (CmdType::NaCommandSystem, 1),
         lexer::Token::NormalPrefix => (CmdType::NaCommandNormal, 1),
-        lexer::Token::InteractivePrefix => (CmdType::Interactive, 1),
         lexer::Token::Word(_) => (CmdType::Shell, 0),
         lexer::Token::Pipe | lexer::Token::Terminator | lexer::Token::AsyncMarker(_) => {
             return Err(NashellError::Parse {
@@ -67,6 +66,8 @@ fn parse_cmd_segment(segment: &str) -> Result<RawCmd, NashellError> {
 pub fn parse(input: &str) -> Result<RawCommands, NashellError> {
     // 阶段 1：检测 !!@Bash: 快捷方式
     if let Some(bash_args) = lexer::detect_bash_shortcut(input) {
+        let first_line = input.split('\n').next().unwrap_or("");
+        let async_name = lexer::detect_async_marker(first_line);
         return Ok(RawCommands {
             commands: vec![RawCmd {
                 cmd_type: CmdType::NaCommandSystem,
@@ -75,7 +76,7 @@ pub fn parse(input: &str) -> Result<RawCommands, NashellError> {
             }],
             long_argument: None,
             pre_out: None,
-            async_name: None,
+            async_name,
         });
     }
 
@@ -172,6 +173,16 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_bash_shortcut_with_async() {
+        let result = parse("!!@Bash: ls -la @/Async(back)").unwrap();
+        assert_eq!(result.commands.len(), 1);
+        assert_eq!(result.commands[0].cmd_type, CmdType::NaCommandSystem);
+        assert_eq!(result.commands[0].cmd, "bash");
+        assert_eq!(result.commands[0].args, vec!["ls -la"]);
+        assert_eq!(result.async_name, Some("back".to_string()));
+    }
+
+    #[test]
     fn test_parse_with_long_argument_multi_line() {
         let input = "!@Write:./test.py @/\nx = 1\nprint(x)";
         let result = parse(input).unwrap();
@@ -189,15 +200,6 @@ mod tests {
         assert_eq!(result.commands[0].cmd_type, CmdType::Shell);
         assert_eq!(result.commands[0].cmd, "ls");
         assert_eq!(result.async_name, Some("test".to_string()));
-    }
-
-    #[test]
-    fn test_parse_interactive() {
-        let result = parse("!vim test.txt").unwrap();
-        assert_eq!(result.commands.len(), 1);
-        assert_eq!(result.commands[0].cmd_type, CmdType::Interactive);
-        assert_eq!(result.commands[0].cmd, "vim");
-        assert_eq!(result.commands[0].args, vec!["test.txt"]);
     }
 
     #[test]

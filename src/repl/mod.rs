@@ -3,6 +3,7 @@ pub mod prompt;
 
 use std::io::Write;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 
 use crate::config::alias;
 use crate::config::schema::NashellConfig;
@@ -11,6 +12,7 @@ use crate::executor::{self, ExecContext, OutputType};
 use crate::nacommand::registry::CommandRegistry;
 use crate::parser;
 use crate::parser::syntax::CmdType;
+use crate::shell::manager::ShellManager;
 use rustyline::DefaultEditor;
 
 /// 显示启动时的 opening 内容。
@@ -114,7 +116,7 @@ fn print_captured_output(
 
 /// 判断命令是否应使用直连终端模式（Stdio::inherit）。
 ///
-/// 条件：单一命令、无 @/Async、非 !!@Bash:、Shell 或 Interactive 类型。
+/// 条件：单一命令、无 @/Async、非 !!@Bash:、Shell 类型。
 fn should_use_direct(raw_commands: &parser::syntax::RawCommands) -> bool {
     if raw_commands.commands.len() != 1 {
         return false;
@@ -127,8 +129,8 @@ fn should_use_direct(raw_commands: &parser::syntax::RawCommands) -> bool {
     if matches!(cmd.cmd_type, CmdType::NaCommandSystem) && cmd.cmd == "bash" {
         return false;
     }
-    // Shell 和 Interactive 走直连模式
-    matches!(cmd.cmd_type, CmdType::Shell | CmdType::Interactive)
+    // Shell 走直连模式
+    matches!(cmd.cmd_type, CmdType::Shell)
 }
 
 /// 构建命令字符串（用于安全检查）。
@@ -149,11 +151,14 @@ fn build_cmd_string(cmd: &parser::syntax::RawCmd) -> String {
 /// - `home_dir`: 用户 home 目录路径
 /// - `config`: 完整配置
 /// - `shell_type`: shell 类型（"bash" 或 "nu"）
+/// - `registry`: 命令注册表
+/// - `shell_manager`: Shell 管理器（Arc<Mutex> 共享引用）
 pub fn run(
     home_dir: Option<std::path::PathBuf>,
     config: &NashellConfig,
     shell_type: &str,
     registry: CommandRegistry,
+    shell_manager: Arc<Mutex<ShellManager>>,
 ) {
     let mut stdout = std::io::stdout();
     let mut rl = match DefaultEditor::new() {
@@ -223,6 +228,79 @@ pub fn run(
                     continue;
                 }
 
+                // === 异步执行 ===
+                // 若 @/Async(name) 存在，跳过同步执行，
+                // 直接在后台线程中异步运行命令，立即返回确认信息。
+                if let Some(ref async_name) = raw_commands.async_name {
+                    let cmd_str = raw_commands
+                        .commands
+                        .iter()
+                        .map(|c| {
+                            let mut s = c.cmd.clone();
+                            for arg in &c.args {
+                                s.push(' ');
+                                s.push_str(arg);
+                            }
+                            s
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" | ");
+
+                    let is_bash = raw_commands
+                        .commands
+                        .first()
+                        .map(|c| {
+                            matches!(c.cmd_type, CmdType::NaCommandSystem)
+                                && c.cmd == "bash"
+                        })
+                        .unwrap_or(false);
+
+                    let cwd = input::current_dir();
+
+                    let result = if is_bash {
+                        let bash_args = raw_commands
+                            .commands
+                            .first()
+                            .and_then(|c| c.args.first())
+                            .cloned()
+                            .unwrap_or_default();
+                        executor::async_exec::spawn_async_bash_exec(
+                            async_name,
+                            &bash_args,
+                            config.shell.timeout_secs,
+                            &shell_manager,
+                            &cwd,
+                        )
+                    } else {
+                        executor::async_exec::spawn_async_shell_exec(
+                            async_name,
+                            &cmd_str,
+                            shell_type,
+                            config.shell.timeout_secs,
+                            &shell_manager,
+                            &cwd,
+                        )
+                    };
+
+                    match result {
+                        Ok(info) => {
+                            let msg = format!(
+                                "shell created and exec: {}\n  name: {}    id: {}",
+                                cmd_str, info.name, info.id
+                            );
+                            writeln!(stdout, "{}", msg).ok();
+                        }
+                        Err(e) => {
+                            let formatted = format_error(&e);
+                            writeln!(stdout, "{}", formatted).ok();
+                        }
+                    }
+                    // 同步 main shell cwd
+                    let cwd = input::current_dir();
+                    shell_manager.lock().ok().map(|mut m| m.sync_main_cwd(&cwd));
+                    continue;
+                }
+
                 // === 直连模式：无管道、无异步、非 Bash ===
                 if should_use_direct(&raw_commands) {
                     let cmd = &raw_commands.commands[0];
@@ -245,6 +323,10 @@ pub fn run(
                             writeln!(stdout, "{}", formatted).ok();
                         }
                     }
+                    {
+                        let cwd = input::current_dir();
+                        shell_manager.lock().ok().map(|mut m| m.sync_main_cwd(&cwd));
+                    }
                     continue;
                 }
 
@@ -266,6 +348,7 @@ pub fn run(
                             None
                         },
                         registry: Some(registry.clone()),
+                        shell_manager: Some(shell_manager.clone()),
                     };
 
                     match executor::dispatch(cmd, &mut ctx) {
@@ -287,18 +370,17 @@ pub fn run(
                 if let Some(ref output) = pre_out {
                     print_captured_output(output, shell_type, config, last_output_type);
                 }
-
-                if raw_commands.async_name.is_some() {
-                    log::debug!(
-                        "Async execution requested: {:?}",
-                        raw_commands.async_name
-                    );
-                }
             }
             Err(e) => {
                 let formatted = format_error(&e);
                 writeln!(stdout, "{}", formatted).ok();
             }
+        }
+
+        // 同步 main shell cwd（处理 Switch 等命令导致的 cwd 变更）
+        {
+            let cwd = input::current_dir();
+            shell_manager.lock().ok().map(|mut m| m.sync_main_cwd(&cwd));
         }
 
         let _ = stdout.flush();

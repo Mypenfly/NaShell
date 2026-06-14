@@ -8,8 +8,11 @@ mod parser;
 mod repl;
 mod shell;
 
-use app::{AppData, CmdMeta, Level};
+use std::sync::{Arc, Mutex};
+
+use app::{CmdMeta, Level};
 use nacommand::registry::CommandRegistry;
+use shell::manager::ShellManager;
 
 fn main() {
     env_logger::init();
@@ -48,6 +51,7 @@ fn main() {
 
     // 构建内置命令注册表
     let mut registry = CommandRegistry::new();
+    // Normal 级命令
     registry.register_builtin(CmdMeta {
         level: Level::Normal,
         name: "write".to_string(),
@@ -64,8 +68,30 @@ fn main() {
         exec_script: None,
         known_modes: vec!["help".to_string()],
     });
+    // System 级命令
+    registry.register_builtin(CmdMeta {
+        level: Level::System,
+        name: "bash".to_string(),
+        exec: "n_bash".to_string(),
+        long_argument: false,
+        exec_script: None,
+        known_modes: vec!["help".to_string()],
+    });
+    registry.register_builtin(CmdMeta {
+        level: Level::System,
+        name: "shell".to_string(),
+        exec: "n_shell".to_string(),
+        long_argument: false,
+        exec_script: None,
+        known_modes: vec![
+            "watch".to_string(),
+            "destroy".to_string(),
+            "switch".to_string(),
+            "help".to_string(),
+        ],
+    });
 
-    let _app_data = AppData::default();
+    let _app_data = app::AppData::default();
 
     // 检测 shell 类型
     let shell_type = match app::init::detect_shell_type() {
@@ -76,10 +102,18 @@ fn main() {
         }
     };
 
+    // 创建 ShellManager
+    let mut shell_manager = ShellManager::new();
+    let cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
+    shell_manager.register_main(&cwd);
+    let shell_manager = Arc::new(Mutex::new(shell_manager));
+
     let home_dir = dirs::home_dir();
 
+    log::info!("Entering REPL with shell type: {}", shell_type);
+
     // 进入 REPL 循环
-    repl::run(home_dir, &config, &shell_type, registry);
+    repl::run(home_dir, &config, &shell_type, registry, shell_manager);
 
     log::info!("NaShell exiting.");
 }
