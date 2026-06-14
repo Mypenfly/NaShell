@@ -1,12 +1,14 @@
 pub mod async_exec;
 pub mod shell_exec;
 
+use std::io::Write;
 use std::sync::{Arc, Mutex};
 
 use crate::error::NashellError;
 use crate::parser::syntax::{CmdType, RawCmd};
 use crate::nacommand::cmd::{NaCommand, NaLevel};
 use crate::nacommand::registry::CommandRegistry;
+use crate::plugin::manager::PluginManager;
 use crate::shell::manager::ShellManager;
 
 /// 命令输出的类型标识。
@@ -36,6 +38,8 @@ pub struct ExecContext {
     pub registry: Option<CommandRegistry>,
     /// Shell 管理器（用于 Shell 管理命令和异步执行）
     pub shell_manager: Option<Arc<Mutex<ShellManager>>>,
+    /// 插件管理器（用于插件命令执行）
+    pub plugin_manager: Option<Arc<Mutex<PluginManager>>>,
 }
 
 /// 检查命令是否匹配安全拦截模式。
@@ -124,7 +128,7 @@ fn build_nacommand(
 /// # 参数
 /// - `cmd`: 解析后的命令
 /// - `ctx`: 执行上下文
-pub fn dispatch(cmd: &RawCmd, ctx: &mut ExecContext) -> Result<(String, OutputType), NashellError> {
+pub fn dispatch(cmd: &RawCmd, ctx: &mut ExecContext, out_writer: &mut dyn Write) -> Result<(String, OutputType), NashellError> {
     // 安全拦截检查（在正式执行前）
     let full_cmd_str = {
         let mut s = cmd.cmd.clone();
@@ -195,6 +199,10 @@ pub fn dispatch(cmd: &RawCmd, ctx: &mut ExecContext) -> Result<(String, OutputTy
                 registry,
                 ctx.shell_manager.clone(),
                 ctx.timeout_secs,
+                ctx.plugin_manager.clone(),
+                &ctx.shell_type,
+                &ctx.deny_patterns,
+                out_writer,
             )?;
             Ok((output, OutputType::NaCommand))
         }
@@ -250,6 +258,7 @@ mod tests {
             long_argument: None,
             registry: None,
             shell_manager: None,
+            plugin_manager: None,
         }
     }
 
@@ -261,7 +270,8 @@ mod tests {
             args: vec!["hello_world".to_string()],
         };
         let mut ctx = test_ctx();
-        let (output, output_type) = dispatch(&cmd, &mut ctx).unwrap();
+        let mut buf = Vec::new();
+        let (output, output_type) = dispatch(&cmd, &mut ctx, &mut buf).unwrap();
         assert!(output.contains("hello_world"));
         assert!(matches!(output_type, OutputType::Shell));
     }
@@ -275,7 +285,8 @@ mod tests {
             args: vec!["/tmp".to_string()],
         };
         let mut ctx = test_ctx();
-        let (output, _) = dispatch(&cmd, &mut ctx).unwrap();
+        let mut buf = Vec::new();
+        let (output, _) = dispatch(&cmd, &mut ctx, &mut buf).unwrap();
         assert!(output.is_empty());
         assert_eq!(
             std::env::current_dir().unwrap(),
@@ -292,7 +303,8 @@ mod tests {
             args: vec![],
         };
         let mut ctx = test_ctx();
-        let result = dispatch(&cmd, &mut ctx);
+        let mut buf = Vec::new();
+        let result = dispatch(&cmd, &mut ctx, &mut buf);
         assert!(result.is_err());
     }
 
@@ -304,7 +316,8 @@ mod tests {
             args: vec!["echo hello_from_bash".to_string()],
         };
         let mut ctx = test_ctx();
-        let (output, output_type) = dispatch(&cmd, &mut ctx).unwrap();
+        let mut buf = Vec::new();
+        let (output, output_type) = dispatch(&cmd, &mut ctx, &mut buf).unwrap();
         assert!(output.contains("hello_from_bash"));
         assert!(matches!(output_type, OutputType::Bash));
     }
@@ -318,7 +331,8 @@ mod tests {
             cmd: "rm".to_string(),
             args: vec!["-rf".to_string(), "/".to_string()],
         };
-        let result = dispatch(&cmd, &mut ctx);
+        let mut buf = Vec::new();
+        let result = dispatch(&cmd, &mut ctx, &mut buf);
         assert!(result.is_err());
         match result {
             Err(NashellError::SafetyBlocked { .. }) => {}
@@ -335,7 +349,8 @@ mod tests {
             cmd: "echo".to_string(),
             args: vec!["hello".to_string()],
         };
-        let result = dispatch(&cmd, &mut ctx);
+        let mut buf = Vec::new();
+        let result = dispatch(&cmd, &mut ctx, &mut buf);
         assert!(result.is_ok());
     }
 

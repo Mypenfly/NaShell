@@ -143,8 +143,8 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, NashellError> {
             continue;
         }
 
-        // 检查 !!@ 前缀
-        if i + 2 < len && chars[i] == '!' && chars[i + 1] == '!' && chars[i + 2] == '@' {
+        // 检查 !!@ 前缀（仅在段开头作为命令类型前缀）
+        if tokens.is_empty() && i + 2 < len && chars[i] == '!' && chars[i + 1] == '!' && chars[i + 2] == '@' {
             tokens.push(Token::SystemPrefix);
             i += 3;
             // 读取命令名（直到 : 或空白）
@@ -163,8 +163,8 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, NashellError> {
             continue;
         }
 
-        // 检查 !@ 前缀
-        if i + 1 < len && chars[i] == '!' && chars[i + 1] == '@' {
+        // 检查 !@ 前缀（仅在段开头作为命令类型前缀）
+        if tokens.is_empty() && i + 1 < len && chars[i] == '!' && chars[i + 1] == '@' {
             tokens.push(Token::NormalPrefix);
             i += 2;
             let mut cmd = String::new();

@@ -1,13 +1,19 @@
-use crate::app::CmdMeta;
+use crate::app::{CmdMeta, PluginMeta};
 use crate::error::NashellError;
 
 /// 命令注册表，管理所有 NaCommand 的注册、查表和帮助信息。
 ///
-/// 查表优先级：内置命令 → 配置命令 → 插件命令（后两者在后续 Phase 完善）。
+/// 查表优先级：内置命令 → 配置命令 → 插件命令。
 #[derive(Debug, Clone)]
 pub struct CommandRegistry {
     /// 内置命令列表（Write、Open 等）
     pub builtin_cmds: Vec<CmdMeta>,
+    /// 用户配置的外部命令列表
+    pub config_cmds: Vec<CmdMeta>,
+    /// 插件注册的命令列表
+    pub plugin_cmds: Vec<CmdMeta>,
+    /// 命令名 → 插件名的映射（仅插件命令）
+    pub cmd_to_plugin: std::collections::HashMap<String, String>,
 }
 
 /// ANSI 颜色样式常量，用于帮助文本格式化。
@@ -40,11 +46,25 @@ fn style_note(text: &str) -> String {
     format!("{}{}{}", style::BRIGHT_YELLOW, text, style::RESET)
 }
 
+/// 查表结果，标识命令来源。
+#[derive(Debug, Clone, PartialEq)]
+pub enum LookupSource {
+    /// 内置命令
+    Builtin,
+    /// 用户配置的外部命令
+    Config,
+    /// 插件命令
+    Plugin,
+}
+
 impl CommandRegistry {
     /// 创建空的命令注册表。
     pub fn new() -> Self {
         CommandRegistry {
             builtin_cmds: Vec::new(),
+            config_cmds: Vec::new(),
+            plugin_cmds: Vec::new(),
+            cmd_to_plugin: std::collections::HashMap::new(),
         }
     }
 
@@ -56,10 +76,75 @@ impl CommandRegistry {
         self.builtin_cmds.push(meta);
     }
 
+    /// 加载插件命令到注册表中。
+    ///
+    /// 从插件元数据列表中提取所有注册的命令，统一存入 plugin_cmds，
+    /// 并建立命令名到插件名的映射。
+    ///
+    /// # 参数
+    /// - `plugins`: 插件元数据列表
+    pub fn load_plugins(&mut self, plugins: &[PluginMeta]) {
+        self.plugin_cmds.clear();
+        self.cmd_to_plugin.clear();
+        for plugin in plugins {
+            for cmd in &plugin.commands {
+                let cmd_name = cmd.name.to_lowercase();
+                self.cmd_to_plugin.insert(cmd_name, plugin.name.clone());
+                self.plugin_cmds.push(cmd.clone());
+            }
+        }
+    }
+
+    /// 查询指定命令所属的插件名称。
+    ///
+    /// # 参数
+    /// - `cmd_name`: 命令名称（大小写不敏感）
+    ///
+    /// # 返回
+    /// 插件名称（如果命令属于某个插件），否则为 None
+    pub fn command_owner(&self, cmd_name: &str) -> Option<&String> {
+        self.cmd_to_plugin.get(&cmd_name.to_lowercase())
+    }
+
+    /// 查表查找命令元数据，同时返回来源。
+    ///
+    /// 按小写匹配，依次查找内置命令、配置命令、插件命令。
+    ///
+    /// # 参数
+    /// - `cmd_name`: 命令名称（大小写不敏感）
+    ///
+    /// # 返回
+    /// - `Ok((&CmdMeta, LookupSource))`: 找到的命令元数据及来源
+    /// - `Err(NashellError::CommandNotFound)`: 未找到
+    pub fn lookup_with_source(&self, cmd_name: &str) -> Result<(&CmdMeta, LookupSource), NashellError> {
+        let lower_name = cmd_name.to_lowercase();
+
+        for cmd in &self.builtin_cmds {
+            if cmd.name.to_lowercase() == lower_name {
+                return Ok((cmd, LookupSource::Builtin));
+            }
+        }
+
+        for cmd in &self.config_cmds {
+            if cmd.name.to_lowercase() == lower_name {
+                return Ok((cmd, LookupSource::Config));
+            }
+        }
+
+        for cmd in &self.plugin_cmds {
+            if cmd.name.to_lowercase() == lower_name {
+                return Ok((cmd, LookupSource::Plugin));
+            }
+        }
+
+        Err(NashellError::CommandNotFound {
+            name: cmd_name.to_string(),
+        })
+    }
+
     /// 查表查找命令元数据。
     ///
     /// 按小写匹配，依次查找内置命令、配置命令、插件命令。
-    /// 当前仅支持内置命令查表。
     ///
     /// # 参数
     /// - `cmd_name`: 命令名称（大小写不敏感）
@@ -68,19 +153,7 @@ impl CommandRegistry {
     /// - `Ok(&CmdMeta)`: 找到的命令元数据
     /// - `Err(NashellError::CommandNotFound)`: 未找到
     pub fn lookup(&self, cmd_name: &str) -> Result<&CmdMeta, NashellError> {
-        let lower_name = cmd_name.to_lowercase();
-
-        for cmd in &self.builtin_cmds {
-            if cmd.name.to_lowercase() == lower_name {
-                return Ok(cmd);
-            }
-        }
-
-        // TODO: Phase 8+ 查 config_cmds, Phase 7+ 查 plugins[*].commands
-
-        Err(NashellError::CommandNotFound {
-            name: cmd_name.to_string(),
-        })
+        self.lookup_with_source(cmd_name).map(|(meta, _)| meta)
     }
 
     /// 获取命令的帮助信息。
@@ -174,17 +247,26 @@ impl CommandRegistry {
             m
         };
 
+        // Check builtin commands first
         for builtin_help in &self.builtin_cmds {
             if builtin_help.name.to_lowercase() == lower_name {
                 if let Some(help_text) = builtin_helps.get(&lower_name) {
                     return Ok(help_text.clone());
                 }
-                break;
+                return Ok(format!("{} 帮助信息暂未提供", style_cmd_name(cmd_name)));
             }
         }
 
-        // TODO: Phase 8+ 外部命令 help 透传 --help
-        // TODO: Phase 7+ 插件命令 help call
+        // For plugin/config commands, return a generic message
+        // (Actual help is obtained by sending a call message with mode="help")
+        for cmd in &self.plugin_cmds {
+            if cmd.name.to_lowercase() == lower_name {
+                return Ok(format!(
+                    "{} (插件命令)\n请使用 Help 模式获取详细帮助信息。",
+                    style_cmd_name(cmd_name)
+                ));
+            }
+        }
 
         Err(NashellError::CommandNotFound {
             name: cmd_name.to_string(),
@@ -201,6 +283,8 @@ mod tests {
     fn test_registry_new_is_empty() {
         let registry = CommandRegistry::new();
         assert!(registry.builtin_cmds.is_empty());
+        assert!(registry.config_cmds.is_empty());
+        assert!(registry.plugin_cmds.is_empty());
     }
 
     #[test]
@@ -300,5 +384,103 @@ mod tests {
         assert_eq!(registry.builtin_cmds.len(), 2);
         assert!(registry.lookup("write").is_ok());
         assert!(registry.lookup("open").is_ok());
+    }
+
+    #[test]
+    fn test_lookup_with_source_builtin() {
+        let mut registry = CommandRegistry::new();
+        registry.builtin_cmds.push(CmdMeta {
+            level: Level::Normal,
+            name: "write".to_string(),
+            exec: "n_write".to_string(),
+            long_argument: true,
+            exec_script: None,
+            known_modes: vec![],
+        });
+
+        let (meta, source) = registry.lookup_with_source("write").unwrap();
+        assert_eq!(meta.name, "write");
+        assert_eq!(source, LookupSource::Builtin);
+    }
+
+    #[test]
+    fn test_lookup_with_source_plugin() {
+        let mut registry = CommandRegistry::new();
+        registry.plugin_cmds.push(CmdMeta {
+            level: Level::System,
+            name: "agent".to_string(),
+            exec: "/usr/bin/agent".to_string(),
+            long_argument: true,
+            exec_script: None,
+            known_modes: vec![],
+        });
+
+        let (meta, source) = registry.lookup_with_source("agent").unwrap();
+        assert_eq!(meta.name, "agent");
+        assert_eq!(source, LookupSource::Plugin);
+    }
+
+    #[test]
+    fn test_get_help_plugin_command() {
+        let mut registry = CommandRegistry::new();
+        registry.plugin_cmds.push(CmdMeta {
+            level: Level::System,
+            name: "agent".to_string(),
+            exec: "/usr/bin/agent".to_string(),
+            long_argument: true,
+            exec_script: None,
+            known_modes: vec!["help".to_string()],
+        });
+
+        let help = registry.get_help("agent", None).unwrap();
+        assert!(help.contains("agent"));
+        assert!(help.contains("插件命令"));
+    }
+
+    #[test]
+    fn test_lookup_priority_builtin_over_plugin() {
+        let mut registry = CommandRegistry::new();
+        registry.builtin_cmds.push(CmdMeta {
+            level: Level::Normal,
+            name: "write".to_string(),
+            exec: "n_write".to_string(),
+            long_argument: true,
+            exec_script: None,
+            known_modes: vec![],
+        });
+        registry.plugin_cmds.push(CmdMeta {
+            level: Level::System,
+            name: "write".to_string(),
+            exec: "/usr/bin/plugin-write".to_string(),
+            long_argument: false,
+            exec_script: None,
+            known_modes: vec![],
+        });
+
+        let (meta, source) = registry.lookup_with_source("write").unwrap();
+        assert_eq!(meta.exec, "n_write");
+        assert_eq!(source, LookupSource::Builtin);
+    }
+
+    #[test]
+    fn test_load_plugins() {
+        let mut registry = CommandRegistry::new();
+        let plugins = vec![PluginMeta {
+            name: "test-plugin".to_string(),
+            exec: "/usr/bin/test".to_string(),
+            is_broadcast: false,
+            commands: vec![CmdMeta {
+                level: Level::Normal,
+                name: "cmd1".to_string(),
+                exec: "/usr/bin/test".to_string(),
+                long_argument: true,
+                exec_script: None,
+                known_modes: vec![],
+            }],
+        }];
+
+        registry.load_plugins(&plugins);
+        assert_eq!(registry.plugin_cmds.len(), 1);
+        assert!(registry.lookup("cmd1").is_ok());
     }
 }

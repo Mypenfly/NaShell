@@ -2,11 +2,14 @@ pub mod cmd;
 pub mod registry;
 pub mod builtin;
 
+use std::io::Write;
 use std::sync::{Arc, Mutex};
 
 use crate::error::NashellError;
 use crate::nacommand::cmd::NaCommand;
-use crate::nacommand::registry::CommandRegistry;
+use crate::nacommand::registry::{CommandRegistry, LookupSource};
+use crate::plugin::manager::PluginManager;
+use crate::plugin::protocol::PluginCall;
 use crate::shell::manager::ShellManager;
 
 /// 执行 NaCommand。
@@ -14,6 +17,7 @@ use crate::shell::manager::ShellManager;
 /// 查表找到对应的命令处理器并执行。
 /// 当 mode 为 "help" 时返回帮助信息。
 /// 当前支持的内置命令：write, open, bash, shell。
+/// 插件命令通过 PluginManager 的 call/response/off 协议执行。
 ///
 /// # 参数
 /// - `cmd`: NaCommand 数据结构
@@ -21,6 +25,9 @@ use crate::shell::manager::ShellManager;
 /// - `registry`: 命令注册表
 /// - `shell_manager`: Shell 管理器（用于 Shell 管理命令，可选）
 /// - `timeout_secs`: 命令超时秒数（用于 Bash 命令）
+/// - `plugin_manager`: 插件管理器（用于插件命令，可选）
+/// - `shell_type`: 当前 shell 类型
+/// - `deny_patterns`: 安全拦截模式列表
 ///
 /// # 返回
 /// - `Ok(String)`: 命令执行结果
@@ -31,11 +38,127 @@ pub fn execute_nacommand(
     registry: &CommandRegistry,
     shell_manager: Option<Arc<Mutex<ShellManager>>>,
     timeout_secs: u64,
+    plugin_manager: Option<Arc<Mutex<PluginManager>>>,
+    shell_type: &str,
+    deny_patterns: &[String],
+    out_writer: &mut dyn Write,
 ) -> Result<String, NashellError> {
     let lower_cmd = cmd.cmd.to_lowercase();
 
-    // 查表确认命令已注册
-    let _found = registry.lookup(&lower_cmd)?;
+    // 查表确认命令已注册，并获取来源
+    let (_meta, source) = registry.lookup_with_source(&lower_cmd)?;
+
+    // 对内置命令，走原有的快速匹配路径
+    if source == LookupSource::Builtin {
+        return execute_builtin(cmd, pre_out, registry, shell_manager, timeout_secs);
+    }
+
+    // 插件命令：通过 PluginManager 的 call/response/off 协议执行
+    if source == LookupSource::Plugin {
+        if let Some(ref pm) = plugin_manager {
+            let mode = cmd.mode.clone().unwrap_or_else(|| "normal".to_string());
+            let level = match cmd.level {
+                crate::nacommand::cmd::NaLevel::Normal => "normal",
+                crate::nacommand::cmd::NaLevel::System => "system",
+            };
+
+            let call = PluginCall {
+                command: lower_cmd.clone(),
+                mode,
+                level: level.to_string(),
+                params: cmd.args.clone(),
+                long_argument: cmd.long_argument.clone(),
+            };
+
+            let plugin_name = registry.command_owner(&lower_cmd)
+                .unwrap_or(&"unknown".to_string())
+                .clone();
+
+            let mut mgr = pm.lock().map_err(|e| NashellError::Plugin {
+                plugin_name: plugin_name.clone(),
+                detail: format!("无法获取 PluginManager 锁: {}", e),
+            })?;
+
+            let handle = mgr.get_handle(&plugin_name)
+                .ok_or_else(|| NashellError::Plugin {
+                    plugin_name: plugin_name.clone(),
+                    detail: "插件句柄未找到，插件可能未启动".to_string(),
+                })?;
+
+            PluginManager::send_call(handle, &call)?;
+
+            let (responses, off) = PluginManager::recv_responses(
+                handle,
+                out_writer,
+                shell_type,
+                timeout_secs,
+                deny_patterns,
+                registry,
+                shell_manager.clone(),
+            )?;
+
+            // Build final output: only non-streaming (off message) content
+            // Streaming responses were already written to out_writer by recv_responses.
+            let mut output = String::new();
+            // Handle off message output
+            if off.is_print && !off.out_content.is_empty() {
+                if let Some(ref prompt) = off.out_prompt {
+                    let _ = writeln!(out_writer, "{}", prompt);
+                }
+                let _ = writeln!(out_writer, "{}", off.out_content);
+            }
+            // Execute off to_exec commands
+            if !off.to_exec.is_empty() {
+                let exec_results = crate::plugin::toexec::execute_toplevel(
+                    &off.to_exec,
+                    1,
+                    shell_type,
+                    timeout_secs,
+                    deny_patterns,
+                    registry,
+                    shell_manager,
+                )?;
+                for result in exec_results {
+                    if !result.is_empty() {
+                        let _ = writeln!(out_writer, "{}", result);
+                    }
+                }
+            }
+
+            return Ok(output);
+        } else {
+            return Err(NashellError::Plugin {
+                plugin_name: lower_cmd,
+                detail: "PluginManager 未初始化，无法执行插件命令".to_string(),
+            });
+        }
+    }
+
+    // Config commands: not yet implemented (Phase 8)
+    if source == LookupSource::Config {
+        return Err(NashellError::Execute {
+            command: lower_cmd,
+            exit_code: None,
+            stderr: "外部配置命令暂未实现 (Phase 8)".to_string(),
+        });
+    }
+
+    Err(NashellError::CommandNotFound {
+        name: cmd.cmd.clone(),
+    })
+}
+
+/// 执行内置 NaCommand。
+///
+/// 快速匹配内置命令名，分发到对应的 handler。
+fn execute_builtin(
+    cmd: &NaCommand,
+    pre_out: Option<String>,
+    registry: &CommandRegistry,
+    shell_manager: Option<Arc<Mutex<ShellManager>>>,
+    timeout_secs: u64,
+) -> Result<String, NashellError> {
+    let lower_cmd = cmd.cmd.to_lowercase();
 
     match lower_cmd.as_str() {
         "write" => {
@@ -148,7 +271,8 @@ mod tests {
             long_argument: Some("hello from execute".to_string()),
         };
 
-        let result = execute_nacommand(&cmd, None, &registry, None, 120).unwrap();
+        let mut out_buf = Vec::new();
+        let result = execute_nacommand(&cmd, None, &registry, None, 120, None, "bash", &[], &mut out_buf).unwrap();
         assert!(result.contains("write to"));
         assert!(result.contains("bytes"));
 
@@ -173,7 +297,8 @@ mod tests {
             long_argument: None,
         };
 
-        let result = strip_ansi(&execute_nacommand(&cmd, None, &registry, None, 120).unwrap());
+        let mut out_buf = Vec::new();
+        let result = strip_ansi(&execute_nacommand(&cmd, None, &registry, None, 120, None, "bash", &[], &mut out_buf).unwrap());
         assert!(result.contains("1  line 1"));
         assert!(result.contains("2  line 2"));
     }
@@ -190,7 +315,8 @@ mod tests {
             long_argument: None,
         };
 
-        let result = execute_nacommand(&cmd, None, &registry, None, 120).unwrap();
+        let mut out_buf = Vec::new();
+        let result = execute_nacommand(&cmd, None, &registry, None, 120, None, "bash", &[], &mut out_buf).unwrap();
         assert!(result.contains("Write"));
         assert!(result.contains("写入文件"));
     }
@@ -207,7 +333,8 @@ mod tests {
             long_argument: None,
         };
 
-        let result = execute_nacommand(&cmd, None, &registry, None, 120);
+        let mut out_buf = Vec::new();
+        let result = execute_nacommand(&cmd, None, &registry, None, 120, None, "bash", &[], &mut out_buf);
         assert!(result.is_err());
         match result {
             Err(NashellError::CommandNotFound { name }) => {
@@ -231,7 +358,8 @@ mod tests {
             long_argument: Some("case insensitive".to_string()),
         };
 
-        let result = execute_nacommand(&cmd, None, &registry, None, 120).unwrap();
+        let mut out_buf = Vec::new();
+        let result = execute_nacommand(&cmd, None, &registry, None, 120, None, "bash", &[], &mut out_buf).unwrap();
         assert!(result.contains("write to"));
     }
 
@@ -247,7 +375,8 @@ mod tests {
             long_argument: None,
         };
 
-        let result = execute_nacommand(&cmd, None, &registry, None, 120).unwrap();
+        let mut out_buf = Vec::new();
+        let result = execute_nacommand(&cmd, None, &registry, None, 120, None, "bash", &[], &mut out_buf).unwrap();
         assert!(result.contains("Open"));
         assert!(result.contains("打开文件"));
     }

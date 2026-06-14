@@ -1,0 +1,22 @@
+prompts {
+    input_prompt_fg "green"
+    input_prompt_format "{path} |> "
+    input_continue_format ">> "
+    output_prompt_format "@System #>>"
+    output_prompt_fg "grey"
+    bash_output_prompt_fg "bright_yellow"
+    shell_type_fg "blue"
+}
+
+shell {
+    timeout_secs 120
+}
+
+safety {
+    deny_patterns "sudo " "rm -rf /" "rm -rf /*" "chmod 777 /" "dd if=" "> /dev/sda"
+}
+
+plugins {
+    dir "test_plugins"
+    max_recursion_depth 3
+}

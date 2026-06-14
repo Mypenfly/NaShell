@@ -159,6 +159,7 @@ pub fn run(
     shell_type: &str,
     registry: CommandRegistry,
     shell_manager: Arc<Mutex<ShellManager>>,
+    plugin_manager: Option<Arc<Mutex<crate::plugin::manager::PluginManager>>>,
 ) {
     let mut stdout = std::io::stdout();
     let mut rl = match DefaultEditor::new() {
@@ -349,9 +350,10 @@ pub fn run(
                         },
                         registry: Some(registry.clone()),
                         shell_manager: Some(shell_manager.clone()),
+                        plugin_manager: plugin_manager.clone(),
                     };
 
-                    match executor::dispatch(cmd, &mut ctx) {
+                    match executor::dispatch(cmd, &mut ctx, &mut stdout) {
                         Ok((output, output_type)) => {
                             pre_out = Some(output);
                             if is_last {

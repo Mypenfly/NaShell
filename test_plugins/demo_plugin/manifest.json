@@ -1,0 +1,15 @@
+{
+    "name": "demo_plugin",
+    "exec": "python3 test_plugins/demo_plugin/plugin.py",
+    "nacommands": {
+        "demo": {
+            "level": "normal",
+            "long_argument": true
+        },
+        "sysinfo": {
+            "level": "system",
+            "long_argument": false
+        }
+    },
+    "is_broadcast": false
+}
