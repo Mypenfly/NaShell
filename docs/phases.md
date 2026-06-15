@@ -625,6 +625,38 @@
 
 ---
 
+### Phase 8 管道数据传递修复
+
+**问题**：`!@NaCmds:Detail -j | from json` 报 "Pipeline empty"——管道中 NaCommand 的输出未能传递给下游 Shell 命令。
+
+**根因**：
+1. `exec_captured()` 没有 stdin 输入参数，管道中前一命令的输出（`pre_out`）在分派 Shell 命令时被丢弃
+2. 更致命的是，nushell 的 `nu -c` 模式**不接收管道 stdin**（`printf 'data' | nu -c 'from json'` 中 `$in` 为空）
+
+**修复方案**：
+
+| 变更 | 文件 | 说明 |
+|------|------|------|
+| `exec_captured` 增加 `stdin_data` 参数 | `shell_exec.rs:150` | `None` 时保持原行为；`Some` 时按 shell_type 差异化注入 |
+| bash 管道注入 | `shell_exec.rs:194` | `printf '%s' <data> \| bash -c '<cmd>'`（bash 的 `-c` 支持 stdin） |
+| nu 临时文件注入 | `shell_exec.rs:166-192` | 写数据到 `/tmp/nashell/pipe_xxx` → `nu -c 'open <path> \| <cmd>'` |
+| dispatch 传递 pre_out | `mod.rs:172` | `exec_captured(..., ctx.pre_out.as_deref())` |
+| 纯 shell 管道优化 | `repl/mod.rs:366-409` | 全部为 `Shell` 类型时合并为单条 `shell -c 'cmd1 \| cmd2'` 执行 |
+| NaCommand → long_argument | `repl/mod.rs:421-422` | 管道中 NaCommand 的 `pre_out` 自动成为 `long_argument` |
+
+**管道语义**：
+
+| 管道模式 | 行为 |
+|----------|------|
+| `Shell \| Shell` | 合并为单条 `shell -c`（原生管道） |
+| `Shell \| NaCommand` | Shell 输出 → NaCommand 的 `long_argument` |
+| `NaCommand \| Shell` | NaCommand 返回的 string → Shell 的 stdin（bash: printf pipe / nu: temp file） |
+| `NaCommand \| NaCommand` | 前段输出 → `pre_out`（各 handler 自行处理） |
+
+**新增测试**：4 个（`test_exec_captured_with_stdin_data`、`test_exec_captured_pipe_stdin_multiline`、`test_dispatch_shell_receives_pre_out_as_stdin`、`test_dispatch_shell_still_works_without_pre_out`），总测试数 310 通过。
+
+---
+
 ## Phase 9: 错误处理、信号处理与退出
 
 **目标**：所有错误路径覆盖完毕，信号处理健壮，退出清理完整。

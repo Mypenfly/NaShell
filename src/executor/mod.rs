@@ -163,12 +163,13 @@ pub fn dispatch(cmd: &RawCmd, ctx: &mut ExecContext, out_writer: &mut dyn Write)
                 return Ok((String::new(), OutputType::Shell));
             }
 
-            // -c 捕获执行
+            // -c 捕获执行，传递管道上游输出（pre_out）作为 stdin
             let result = shell_exec::exec_captured(
                 &cmd.cmd,
                 &cmd.args,
                 &ctx.shell_type,
                 ctx.timeout_secs,
+                ctx.pre_out.as_deref(),
             )?;
             if result.exit_code == 0 {
                 Ok((result.stdout, OutputType::Shell))
@@ -508,5 +509,36 @@ mod tests {
         assert_eq!(nacmd.cmd, "websearch");
         assert_eq!(nacmd.mode, None);
         assert_eq!(nacmd.args, vec!["rust", "async", "-n", "5"]);
+    }
+
+    #[test]
+    fn test_dispatch_shell_receives_pre_out_as_stdin() {
+        // 管道上游已产生输出 "hello"，下游 cat 应通过 stdin 收到
+        let cmd = RawCmd {
+            cmd_type: CmdType::Shell,
+            cmd: "cat".to_string(),
+            args: vec![],
+        };
+        let mut ctx = test_ctx();
+        ctx.pre_out = Some("hello".to_string());
+        let mut buf = Vec::new();
+        let (output, output_type) = dispatch(&cmd, &mut ctx, &mut buf).unwrap();
+        assert_eq!(output.trim(), "hello");
+        assert!(matches!(output_type, OutputType::Shell));
+    }
+
+    #[test]
+    fn test_dispatch_shell_still_works_without_pre_out() {
+        // 无 pre_out 时 shell 命令正常执行（无 stdin 注入）
+        let cmd = RawCmd {
+            cmd_type: CmdType::Shell,
+            cmd: "echo".to_string(),
+            args: vec!["world".to_string()],
+        };
+        let mut ctx = test_ctx();
+        let mut buf = Vec::new();
+        let (output, output_type) = dispatch(&cmd, &mut ctx, &mut buf).unwrap();
+        assert!(output.contains("world"));
+        assert!(matches!(output_type, OutputType::Shell));
     }
 }

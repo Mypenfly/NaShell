@@ -138,24 +138,82 @@ pub fn exec_bash(
 ///
 /// 如果命令超过 `timeout_secs` 秒未完成，强制终止并返回超时错误。
 ///
-/// 执行链路：
-///   Rust Command → script -e -q -c "{shell} -c '{command}'" /dev/null
+/// 当 `stdin_data` 为 Some 时，将数据注入子进程：
+/// - bash: 通过 shell 管道 `printf '%s' '<data>' | bash -c '<cmd>'`
+/// - nu:   写入临时文件 `open /tmp/nashell/... | nu -c '<cmd>'`（nu -c 不读 piped stdin）
 ///
 /// # 参数
 /// - `cmd`: 命令名
 /// - `args`: 命令参数
 /// - `shell_type`: shell 类型（"bash" 或 "nu"）
 /// - `timeout_secs`: 超时秒数（0 表示无超时）
+/// - `stdin_data`: 注入子进程 stdin 的数据，None 时不注入
 pub fn exec_captured(
     cmd: &str,
     args: &[String],
     shell_type: &str,
     timeout_secs: u64,
+    stdin_data: Option<&str>,
 ) -> Result<CapturedOutput, NashellError> {
     let mut full_cmd = cmd.to_string();
     for arg in args {
         full_cmd.push(' ');
         full_cmd.push_str(arg);
+    }
+
+    // nu -c 不接收管道 stdin，需通过临时文件传递数据
+    if let Some(data) = stdin_data {
+        if shell_type == "nu" {
+            let tmp_dir = ensure_tmp_nashell_dir()?;
+            let tmp_path = tmp_dir.join(format!(
+                "pipe_{}_{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .subsec_nanos()
+            ));
+            std::fs::write(&tmp_path, data).map_err(|e| NashellError::Io {
+                path: Some(tmp_path.to_string_lossy().to_string()),
+                source: e,
+            })?;
+            let tmp_quoted = shell_quote(&tmp_path.to_string_lossy());
+            let inner_cmd = format!(
+                "{} -c 'open {} | {}'",
+                shell_type,
+                tmp_quoted,
+                full_cmd
+            );
+            return run_script_and_cleanup(
+                &inner_cmd,
+                &full_cmd,
+                timeout_secs,
+                tmp_path,
+            );
+        } else {
+            let inner_cmd = format!(
+                "printf '%s' {} | {} -c {}",
+                shell_quote(data),
+                shell_type,
+                shell_quote(&full_cmd)
+            );
+            let child = Command::new("script")
+                .stdin(Stdio::inherit())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .arg("-e")
+                .arg("-q")
+                .arg("-c")
+                .arg(&inner_cmd)
+                .arg("/dev/null")
+                .env("TERM", "xterm-256color")
+                .spawn()
+                .map_err(|e| NashellError::Io {
+                    path: Some("script".to_string()),
+                    source: e,
+                })?;
+            return wait_child_with_timeout(child, &full_cmd, timeout_secs);
+        }
     }
 
     let inner_cmd = format!("{} -c {}", shell_type, shell_quote(&full_cmd));
@@ -177,6 +235,44 @@ pub fn exec_captured(
         })?;
 
     wait_child_with_timeout(child, &full_cmd, timeout_secs)
+}
+
+/// 运行 script 命令并在完成后清理临时文件。
+fn run_script_and_cleanup(
+    inner_cmd: &str,
+    label: &str,
+    timeout_secs: u64,
+    tmp_path: std::path::PathBuf,
+) -> Result<CapturedOutput, NashellError> {
+    let child = Command::new("script")
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .arg("-e")
+        .arg("-q")
+        .arg("-c")
+        .arg(inner_cmd)
+        .arg("/dev/null")
+        .env("TERM", "xterm-256color")
+        .spawn()
+        .map_err(|e| NashellError::Io {
+            path: Some("script".to_string()),
+            source: e,
+        })?;
+
+    let result = wait_child_with_timeout(child, label, timeout_secs);
+    let _ = std::fs::remove_file(&tmp_path);
+    result
+}
+
+/// 确保 `/tmp/nashell/` 目录存在。
+fn ensure_tmp_nashell_dir() -> Result<std::path::PathBuf, NashellError> {
+    let dir = std::path::PathBuf::from("/tmp/nashell");
+    std::fs::create_dir_all(&dir).map_err(|e| NashellError::Io {
+        path: Some(dir.to_string_lossy().to_string()),
+        source: e,
+    })?;
+    Ok(dir)
 }
 
 /// 执行 `cd` 目录切换。
@@ -462,7 +558,7 @@ mod tests {
 
     #[test]
     fn test_exec_captured_basic() {
-        let result = exec_captured("echo", &["hello".to_string()], "bash", 120);
+        let result = exec_captured("echo", &["hello".to_string()], "bash", 120, None);
         assert!(result.is_ok());
         let output = result.unwrap();
         assert!(output.stdout.contains("hello"));
@@ -472,7 +568,7 @@ mod tests {
     #[test]
     fn test_exec_captured_error() {
         let result =
-            exec_captured("ls", &["/nonexistent_path_xyz".to_string()], "bash", 120);
+            exec_captured("ls", &["/nonexistent_path_xyz".to_string()], "bash", 120, None);
         assert!(result.is_ok());
         let output = result.unwrap();
         assert_ne!(output.exit_code, 0);
@@ -480,11 +576,32 @@ mod tests {
 
     #[test]
     fn test_exec_captured_nonexistent_command() {
-        let result = exec_captured("nonexistent_command_xyz", &[], "bash", 120);
+        let result = exec_captured("nonexistent_command_xyz", &[], "bash", 120, None);
         assert!(result.is_ok());
         let output = result.unwrap();
         assert_ne!(output.exit_code, 0);
         assert!(!output.stderr.is_empty() || output.exit_code == 127);
+    }
+
+    #[test]
+    fn test_exec_captured_with_stdin_data() {
+        let result = exec_captured("cat", &[], "bash", 120, Some("hello"));
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert_eq!(output.exit_code, 0);
+        assert_eq!(output.stdout, "hello");
+    }
+
+    #[test]
+    fn test_exec_captured_pipe_stdin_multiline() {
+        let data = "line1\nline2\nline3";
+        let result = exec_captured("cat", &["-n".to_string()], "bash", 120, Some(data));
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert_eq!(output.exit_code, 0);
+        assert!(output.stdout.contains("1\tline1"));
+        assert!(output.stdout.contains("2\tline2"));
+        assert!(output.stdout.contains("3\tline3"));
     }
 
     #[test]

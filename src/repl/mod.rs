@@ -363,8 +363,54 @@ pub fn run(
                 let cmd_count = raw_commands.commands.len();
                 let mut last_output_type = OutputType::Shell;
 
+                // 纯 shell 管道（无 NaCommand）：合并为单条 shell -c 执行，
+                // 让 shell 原生管道机制处理数据传递，避免逐段拆分后 stdin 断开。
+                let all_shell = raw_commands.commands.iter().all(|c| matches!(c.cmd_type, CmdType::Shell));
+                if all_shell && cmd_count > 1 {
+                    let combined = raw_commands.commands.iter()
+                        .map(|c| {
+                            let mut s = c.cmd.clone();
+                            for arg in &c.args {
+                                s.push(' ');
+                                s.push_str(arg);
+                            }
+                            s
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" | ");
+
+                    if let Err(e) = executor::check_safety(&combined, &config.safety.deny_patterns) {
+                        let formatted = format_error(&e);
+                        writeln!(stdout, "{}", formatted).ok();
+                        continue;
+                    }
+
+                    match executor::shell_exec::exec_captured(
+                        &combined, &[], shell_type, config.shell.timeout_secs, None,
+                    ) {
+                        Ok(result) => {
+                            let mut output = result.stdout;
+                            if !result.stderr.is_empty() {
+                                if !output.is_empty() {
+                                    output.push('\n');
+                                }
+                                output.push_str(&result.stderr);
+                            }
+                            if !output.is_empty() {
+                                print_captured_output(&output, shell_type, config, OutputType::Shell);
+                            }
+                        }
+                        Err(e) => {
+                            let formatted = format_error(&e);
+                            writeln!(stdout, "{}", formatted).ok();
+                        }
+                    }
+                    continue;
+                }
+
                 for (i, cmd) in raw_commands.commands.iter().enumerate() {
                     let is_last = i == cmd_count - 1;
+                    let is_nacmd = matches!(cmd.cmd_type, CmdType::NaCommandNormal | CmdType::NaCommandSystem);
                     let mut ctx = ExecContext {
                         shell_type: shell_type.to_string(),
                         pre_out: pre_out.clone(),
@@ -372,6 +418,8 @@ pub fn run(
                         deny_patterns: config.safety.deny_patterns.clone(),
                         long_argument: if i == 0 {
                             raw_commands.long_argument.clone()
+                        } else if is_nacmd {
+                            pre_out.clone()
                         } else {
                             None
                         },
