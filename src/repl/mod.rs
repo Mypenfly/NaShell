@@ -1,5 +1,6 @@
 pub mod input;
 pub mod prompt;
+pub mod signals;
 
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -8,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use crate::config::alias;
 use crate::config::schema::NashellConfig;
 use crate::error::display::format_error;
+use crate::error::NashellError;
 use crate::executor::{self, ExecContext, OutputType};
 use crate::nacommand::registry::CommandRegistry;
 use crate::parser;
@@ -191,6 +193,60 @@ fn broadcast_shell_state(
     }
 }
 
+/// 根据注册表修正格式错误的 hint，使用正确的调用级别前缀。
+///
+/// 当词法分析检测到格式错误（如缺少冒号）时，它无法获知命令的注册级别。
+/// 此函数在 REPL 层通过注册表查表，用正确的级别前缀替换 hint 中的前缀。
+///
+/// # 参数
+/// - `err`: 原始错误
+/// - `registry`: 命令注册表
+///
+/// # 返回
+/// 修正后的错误（若无法修正则返回原错误）
+fn enrich_error_with_registry(err: NashellError, registry: &CommandRegistry) -> NashellError {
+    match err {
+        NashellError::NaFormatError {
+            input,
+            detail,
+            hint,
+            cmd_name,
+            used_prefix,
+        } => {
+            // 尝试查注册表，修正 hint 中的前缀
+            if let (Some(ref name), Some(ref prefix)) = (&cmd_name, &used_prefix) {
+                if let Ok(meta) = registry.lookup(name) {
+                    let correct_prefix = match meta.level {
+                        crate::app::Level::Normal => "!@",
+                        crate::app::Level::System => "!!@",
+                    };
+                    if correct_prefix != prefix.as_str() {
+                        let new_hint = hint.replace(prefix, correct_prefix);
+                        let new_detail = detail.replace(prefix, correct_prefix);
+                        return NashellError::NaFormatError {
+                            input,
+                            detail: new_detail,
+                            hint: new_hint,
+                            cmd_name,
+                            used_prefix,
+                        };
+                    }
+                }
+            }
+            // 无法修正，返回原错误
+            NashellError::NaFormatError {
+                input,
+                detail,
+                hint,
+                cmd_name,
+                used_prefix,
+            }
+        }
+        // 其它错误类型不处理
+        other => other,
+    }
+}
+
 /// 运行 REPL（Read-Eval-Print Loop）循环。
 ///
 /// 显示提示符，读取用户输入，解析并执行，循环直到用户输入 `exit` 或 EOF。
@@ -218,11 +274,20 @@ pub fn run(
         }
     };
 
+    // 安装信号处理器
+    signals::install_handlers();
+
     log::info!("REPL started with shell type: {}", shell_type);
 
     show_opening(config);
 
     loop {
+        // 检查是否需要优雅退出（SIGTERM / SIGHUP / 双次 Ctrl+C）
+        if signals::should_shutdown() {
+            log::info!("Shutdown signal received, exiting REPL.");
+            break;
+        }
+
         let cwd = input::current_dir();
         let home = home_dir.as_deref();
 
@@ -247,6 +312,16 @@ pub fn run(
                 continue;
             }
         };
+
+        // 再次检查关闭信号（可能在输入等待期间收到）
+        if signals::should_shutdown() {
+            log::info!("Shutdown signal received, exiting REPL.");
+            break;
+        }
+
+        // 清除中断标志（在输入等待期间收到的 Ctrl+C 只是取消当前输入行，
+        // rustyline 已处理，这里重置标志即可）
+        signals::check_and_clear_interrupt();
 
         if input == "exit" {
             log::info!("User requested exit");
@@ -280,8 +355,6 @@ pub fn run(
                 }
 
                 // === 异步执行 ===
-                // 若 @/Async(name) 存在，跳过同步执行，
-                // 在后台线程中走完整解析→分派流程异步运行命令，立即返回确认信息。
                 if let Some(ref async_name) = raw_commands.async_name {
                     let cwd = input::current_dir();
 
@@ -329,7 +402,7 @@ pub fn run(
                     continue;
                 }
 
-                // === 直连模式：无管道、无异步、非 Bash ===
+                // === 直连模式 ===
                 if should_use_direct(&raw_commands) {
                     let cmd = &raw_commands.commands[0];
                     let cmd_str = build_cmd_string(cmd);
@@ -355,16 +428,21 @@ pub fn run(
                         let cwd = input::current_dir();
                         shell_manager.lock().ok().map(|mut m| m.sync_main_cwd(&cwd));
                     }
+
+                    // 检查中断
+                    if signals::check_and_clear_interrupt() {
+                        log::debug!("SIGINT received, command interrupted.");
+                        writeln!(stdout, "^C").ok();
+                    }
                     continue;
                 }
 
-                // === Captured 模式：有管道 / 异步 / Bash ===
+                // === Captured 模式 ===
                 let mut pre_out: Option<String> = None;
                 let cmd_count = raw_commands.commands.len();
                 let mut last_output_type = OutputType::Shell;
 
-                // 纯 shell 管道（无 NaCommand）：合并为单条 shell -c 执行，
-                // 让 shell 原生管道机制处理数据传递，避免逐段拆分后 stdin 断开。
+                // 纯 shell 管道
                 let all_shell = raw_commands.commands.iter().all(|c| matches!(c.cmd_type, CmdType::Shell));
                 if all_shell && cmd_count > 1 {
                     let combined = raw_commands.commands.iter()
@@ -404,6 +482,11 @@ pub fn run(
                             let formatted = format_error(&e);
                             writeln!(stdout, "{}", formatted).ok();
                         }
+                    }
+
+                    if signals::check_and_clear_interrupt() {
+                        log::debug!("SIGINT received during pipeline execution.");
+                        writeln!(stdout, "^C").ok();
                     }
                     continue;
                 }
@@ -449,21 +532,28 @@ pub fn run(
                     print_captured_output(output, shell_type, config, last_output_type);
                 }
 
-                // 若管道中包含 shell 管理命令，广播 shell 状态变更
+                // 广播 shell 状态变更
                 let has_shell_cmd = raw_commands.commands.iter().any(|c| {
                     matches!(c.cmd_type, CmdType::NaCommandSystem) && c.cmd == "shell"
                 });
                 if has_shell_cmd {
                     broadcast_shell_state(&plugin_manager, &shell_manager);
                 }
+
+                // 检查中断
+                if signals::check_and_clear_interrupt() {
+                    log::debug!("SIGINT received during pipeline execution.");
+                    writeln!(stdout, "^C").ok();
+                }
             }
             Err(e) => {
-                let formatted = format_error(&e);
+                let enriched = enrich_error_with_registry(e, &registry);
+                let formatted = format_error(&enriched);
                 writeln!(stdout, "{}", formatted).ok();
             }
         }
 
-        // 同步 main shell cwd（处理 Switch 等命令导致的 cwd 变更）
+        // 同步 main shell cwd
         {
             let cwd = input::current_dir();
             shell_manager.lock().ok().map(|mut m| m.sync_main_cwd(&cwd));
@@ -473,5 +563,54 @@ pub fn run(
         broadcast_cwd_if_changed(&old_cwd, &plugin_manager);
 
         let _ = stdout.flush();
+    }
+
+    // === 退出清理 ===
+    cleanup(&plugin_manager, &shell_manager);
+    log::info!("Exit cleanup completed.");
+}
+
+/// 退出前清理资源。
+///
+/// 按顺序执行：
+/// 1. 关闭所有插件
+/// 2. 销毁所有异步 shell
+/// 3. 清理 /tmp/nashell/ 临时文件
+fn cleanup(
+    plugin_manager: &Option<Arc<Mutex<crate::plugin::manager::PluginManager>>>,
+    shell_manager: &Arc<Mutex<ShellManager>>,
+) {
+    // 1. 关闭所有插件
+    if let Some(ref pm) = plugin_manager {
+        log::info!("Stopping all plugins...");
+        let mut mgr = pm.lock().unwrap_or_else(|e| e.into_inner());
+        mgr.stop_all();
+    }
+
+    // 2. 销毁所有异步 shell
+    {
+        log::info!("Destroying async shells...");
+        let mut mgr = shell_manager.lock().unwrap_or_else(|e| e.into_inner());
+        let shell_ids: Vec<String> = mgr
+            .shells
+            .keys()
+            .filter(|id| mgr.get_shell_name(id) != Some("main"))
+            .cloned()
+            .collect();
+        for id in shell_ids {
+            if let Err(e) = mgr.destroy_shell(&id) {
+                log::warn!("Failed to destroy shell '{}': {}", id, e);
+            }
+        }
+    }
+
+    // 3. 清理 /tmp/nashell/ 临时文件
+    let tmp_dir = std::path::PathBuf::from("/tmp/nashell");
+    if tmp_dir.exists() {
+        log::info!("Cleaning up temporary files in /tmp/nashell/...");
+        match std::fs::remove_dir_all(&tmp_dir) {
+            Ok(()) => log::info!("Temporary files cleaned up."),
+            Err(e) => log::warn!("Failed to clean up /tmp/nashell/: {}", e),
+        }
     }
 }

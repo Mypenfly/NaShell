@@ -10,6 +10,7 @@ use crate::constants::{PLUGIN_RECV_TIMEOUT_SECS, PLUGIN_TIMEOUT_SECS};
 use crate::error::NashellError;
 use crate::plugin::protocol::{
     recv_message, send_message, GetInput, PluginCall, PluginMessage, PluginOff, PluginResponse,
+    ToExec,
 };
 use crate::repl::prompt::colorize;
 
@@ -401,25 +402,32 @@ impl PluginManager {
             match msg {
                 PluginMessage::Response { data, .. } => {
                     // Handle to_exec
-                    if !data.to_exec.is_empty() {
-                        let exec_result = super::toexec::execute_toplevel(
-                            &data.to_exec, 1, shell_type, timeout_secs,
-                            deny_patterns, registry, shell_manager.clone(),
-                        )?;
-                        let resp_with_result = PluginResponse {
-                            streaming: false,
-                            out_content: String::new(),
-                            out_prompt: None,
-                            prompt_fg: "gray".to_string(),
-                            is_print: false,
-                            to_exec: vec![],
-                            exec_result: Some(exec_result),
-                            get_input: None,
-                            user_input: None,
-                        };
-                        Self::send_response(handle, &resp_with_result)?;
+                    if let Some(ref to_exec) = data.to_exec {
+                        if !to_exec.execs.is_empty() {
+                            let exec_result = exec_toexec_commands(
+                                to_exec,
+                                &plugin_name,
+                                shell_type,
+                                timeout_secs,
+                                deny_patterns,
+                                registry,
+                                shell_manager.clone(),
+                            )?;
+                            let resp_with_result = PluginResponse {
+                                streaming: false,
+                                out_content: String::new(),
+                                out_prompt: None,
+                                prompt_fg: "gray".to_string(),
+                                is_print: false,
+                                to_exec: None,
+                                exec_result: Some(exec_result),
+                                get_input: None,
+                                user_input: None,
+                            };
+                            Self::send_response(handle, &resp_with_result)?;
+                        }
                     }
-                    // Handle get_input: pause, display prompt, collect user input
+                    // Handle get_input
                     if let Some(ref gi) = data.get_input {
                         let user_input = request_user_input(gi)?;
                         let resp_with_input = PluginResponse {
@@ -428,7 +436,7 @@ impl PluginManager {
                             out_prompt: None,
                             prompt_fg: "gray".to_string(),
                             is_print: false,
-                            to_exec: vec![],
+                            to_exec: None,
                             exec_result: None,
                             get_input: None,
                             user_input: Some(user_input),
@@ -502,7 +510,68 @@ impl PluginManager {
     }
 }
 
-/// 将插件的单条 response 消息实时打印到 stdout。
+/// 执行插件 toExec 中的命令列表，按 is_print 决定是否向终端输出。
+///
+/// 对每条命令：
+/// - 打印 `@plugin_name exec > cmd` 提示（is_print=true 时绿色，false 时灰色）
+/// - is_print=true: 执行后结果实时显示在终端，同时收集到结果列表
+/// - is_print=false: 执行后仅收集结果，不在终端显示命令输出
+///
+/// # 返回
+/// 每条命令的执行结果（顺序与 execs 对应），用于回传给插件
+fn exec_toexec_commands(
+    to_exec: &ToExec,
+    plugin_name: &str,
+    shell_type: &str,
+    _default_timeout: u64,
+    deny_patterns: &[String],
+    registry: &crate::nacommand::registry::CommandRegistry,
+    shell_manager: Option<Arc<std::sync::Mutex<crate::shell::manager::ShellManager>>>,
+) -> Result<Vec<String>, NashellError> {
+    use crate::repl::prompt::colorize;
+    let mut stdout = std::io::stdout();
+    let prompt_fg = if to_exec.is_print { "green" } else { "gray" };
+
+    let mut results = Vec::with_capacity(to_exec.execs.len());
+
+    for cmd_line in &to_exec.execs {
+        // 打印执行提示
+        let exec_hint = colorize(
+            &format!("@{} exec > {}", plugin_name, cmd_line),
+            prompt_fg,
+        );
+        let _ = writeln!(stdout, "{}", exec_hint);
+
+        let cmd_timeout = if to_exec.timeout > 0 { to_exec.timeout } else { 90 };
+
+        let depth = 1u32;
+
+        let result = super::toexec::execute_toplevel(
+            &[cmd_line.clone()],
+            depth,
+            shell_type,
+            cmd_timeout,
+            deny_patterns,
+            registry,
+            shell_manager.clone(),
+            to_exec.is_print,
+        )?;
+        let single_result = result.into_iter().next().unwrap_or_default();
+
+        if to_exec.is_print {
+            // is_print=true: execute_toplevel 已经通过 exec_captured_streaming
+            // 实时打印了输出。这里只需要打印结果中未被流式捕获的尾部（如 @[cmd] #> 标注）
+            // 大多数情况下输出已在终端显示，不需要额外打印。
+        } else {
+            // is_print=false: 不打印结果到终端
+        }
+
+        results.push(single_result);
+    }
+
+    let _ = stdout.flush();
+    Ok(results)
+}
 ///
 /// 若 `is_print` 为 true，则以 `prompt_fg` 颜色打印 out_prompt（如有）和 out_content。
 fn print_plugin_response(data: &PluginResponse) {

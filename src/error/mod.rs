@@ -46,6 +46,8 @@ pub enum NashellError {
     CommandNotFound {
         /// 命令名称
         name: String,
+        /// 模糊匹配的建议命令名
+        suggestion: Option<String>,
     },
     /// 超时
     Timeout {
@@ -60,6 +62,28 @@ pub enum NashellError {
         command: String,
         /// 拦截原因
         reason: String,
+    },
+    /// NaCommand 调用级别错误（如 Normal 前缀用于 System 命令）
+    NaLevelError {
+        /// 用户输入的命令名
+        command: String,
+        /// 用户使用的级别前缀（"!@" 或 "!!@"）
+        used_level: String,
+        /// 期望的级别前缀（"!!@" 或 "!@"）
+        expected_level: String,
+    },
+    /// NaCommand 格式错误（如缺少冒号）
+    NaFormatError {
+        /// 用户输入
+        input: String,
+        /// 错误详情
+        detail: String,
+        /// 正确格式提示（可能被 REPL 根据注册表修正）
+        hint: String,
+        /// 提取出的命令名（用于在注册表中查表修正 hint）
+        cmd_name: Option<String>,
+        /// 用户使用的前缀（"!@" 或 "!!@"）
+        used_prefix: Option<String>,
     },
 }
 
@@ -100,8 +124,16 @@ impl fmt::Display for NashellError {
             } => {
                 write!(f, "Plugin '{}' error: {}", plugin_name, detail)
             }
-            NashellError::CommandNotFound { name } => {
-                write!(f, "Command not found: {}", name)
+            NashellError::CommandNotFound { name, suggestion } => {
+                if let Some(ref sug) = suggestion {
+                    write!(
+                        f,
+                        "Command not found: '{}'. Did you mean '{}'?",
+                        name, sug
+                    )
+                } else {
+                    write!(f, "Command not found: '{}'", name)
+                }
             }
             NashellError::Timeout { command, seconds } => {
                 write!(
@@ -112,6 +144,25 @@ impl fmt::Display for NashellError {
             }
             NashellError::SafetyBlocked { command, reason } => {
                 write!(f, "Command '{}' blocked by safety: {}", command, reason)
+            }
+            NashellError::NaLevelError {
+                command,
+                used_level,
+                expected_level,
+            } => {
+                write!(
+                    f,
+                    "NaLevel error: '{}' is a System-level command, use '{}' prefix (you used '{}')",
+                    command, expected_level, used_level
+                )
+            }
+            NashellError::NaFormatError {
+                input,
+                detail,
+                hint: _,
+                ..
+            } => {
+                write!(f, "NaFormat error in '{}': {}", input, detail)
             }
         }
     }
@@ -147,6 +198,7 @@ mod tests {
     fn test_command_not_found() {
         let err = NashellError::CommandNotFound {
             name: "unknown_cmd".to_string(),
+            suggestion: None,
         };
         let display_str = format!("{}", err);
         assert!(display_str.contains("unknown_cmd"));
@@ -180,6 +232,7 @@ mod tests {
     fn test_error_trait() {
         let err = NashellError::CommandNotFound {
             name: "test".to_string(),
+            suggestion: None,
         };
         let _: &dyn std::error::Error = &err;
     }

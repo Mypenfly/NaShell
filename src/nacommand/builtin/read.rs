@@ -53,12 +53,12 @@ fn new_highlighter(extension: &str) -> (HighlightLines<'static>, &'static Syntax
     (h, ss)
 }
 
-/// 解析 Open 命令的可选参数。
+/// 解析 Read 命令的可选参数。
 ///
 /// 从 args 中提取 --limit/-l, --start/-s, --end/-e。
 /// 返回 (limit, start, end) 的元组。
 /// start 和 end 是 1-indexed 的。
-fn parse_open_options(args: &[String]) -> Result<(usize, usize, Option<usize>), NashellError> {
+fn parse_read_options(args: &[String]) -> Result<(usize, usize, Option<usize>), NashellError> {
     let mut limit: usize = DEFAULT_OPEN_LIMIT;
     let mut start: usize = 1;
     let mut end: Option<usize> = None;
@@ -70,7 +70,7 @@ fn parse_open_options(args: &[String]) -> Result<(usize, usize, Option<usize>), 
             "-l" | "--limit" => {
                 if i + 1 >= args.len() {
                     return Err(NashellError::Execute {
-                        command: "open".to_string(),
+                        command: "read".to_string(),
                         exit_code: None,
                         stderr: format!("{} 缺少值", arg),
                     });
@@ -78,7 +78,7 @@ fn parse_open_options(args: &[String]) -> Result<(usize, usize, Option<usize>), 
                 limit = args[i + 1]
                     .parse::<usize>()
                     .map_err(|_| NashellError::Execute {
-                        command: "open".to_string(),
+                        command: "read".to_string(),
                         exit_code: None,
                         stderr: format!("无效的 {} 值: {}", arg, args[i + 1]),
                     })?;
@@ -87,7 +87,7 @@ fn parse_open_options(args: &[String]) -> Result<(usize, usize, Option<usize>), 
             "-s" | "--start" => {
                 if i + 1 >= args.len() {
                     return Err(NashellError::Execute {
-                        command: "open".to_string(),
+                        command: "read".to_string(),
                         exit_code: None,
                         stderr: format!("{} 缺少值", arg),
                     });
@@ -95,7 +95,7 @@ fn parse_open_options(args: &[String]) -> Result<(usize, usize, Option<usize>), 
                 start = args[i + 1]
                     .parse::<usize>()
                     .map_err(|_| NashellError::Execute {
-                        command: "open".to_string(),
+                        command: "read".to_string(),
                         exit_code: None,
                         stderr: format!("无效的 {} 值: {}", arg, args[i + 1]),
                     })?;
@@ -104,7 +104,7 @@ fn parse_open_options(args: &[String]) -> Result<(usize, usize, Option<usize>), 
             "-e" | "--end" => {
                 if i + 1 >= args.len() {
                     return Err(NashellError::Execute {
-                        command: "open".to_string(),
+                        command: "read".to_string(),
                         exit_code: None,
                         stderr: format!("{} 缺少值", arg),
                     });
@@ -113,7 +113,7 @@ fn parse_open_options(args: &[String]) -> Result<(usize, usize, Option<usize>), 
                     args[i + 1]
                         .parse::<usize>()
                         .map_err(|_| NashellError::Execute {
-                            command: "open".to_string(),
+                            command: "read".to_string(),
                             exit_code: None,
                             stderr: format!("无效的 {} 值: {}", arg, args[i + 1]),
                         })?,
@@ -146,7 +146,7 @@ fn parse_dir_depth(args: &[String]) -> Result<usize, NashellError> {
             "-l" | "--limit" => {
                 if i + 1 >= args.len() {
                     return Err(NashellError::Execute {
-                        command: "open".to_string(),
+                        command: "read".to_string(),
                         exit_code: None,
                         stderr: format!("{} 缺少值", arg),
                     });
@@ -154,7 +154,7 @@ fn parse_dir_depth(args: &[String]) -> Result<usize, NashellError> {
                 depth = args[i + 1]
                     .parse::<usize>()
                     .map_err(|_| NashellError::Execute {
-                        command: "open".to_string(),
+                        command: "read".to_string(),
                         exit_code: None,
                         stderr: format!("无效的 {} 值: {}", arg, args[i + 1]),
                     })?;
@@ -278,7 +278,7 @@ fn read_file_with_options(
     let max_line = end.unwrap_or(start + limit - 1);
     if start < 1 {
         return Err(NashellError::Execute {
-            command: "open".to_string(),
+            command: "read".to_string(),
             exit_code: None,
             stderr: format!("起始行号 {} 无效，必须 >= 1", start),
         });
@@ -316,7 +316,7 @@ fn read_file_with_options(
     Ok(output)
 }
 
-/// 执行 Open 命令：打开文件或文件夹。
+/// 执行 Read 命令：打开文件或文件夹。
 ///
 /// - path 为目录：输出目录结构树（类似 tree 命令）。
 /// - path 为文件：输出带行号的文件内容，支持 --limit/-l, --start/-s, --end/-e。
@@ -328,9 +328,9 @@ fn read_file_with_options(
 /// # 返回
 /// - `Ok(String)`: 格式化后的内容
 /// - `Err(NashellError)`: 路径不存在、参数错误或 IO 错误
-pub fn execute_open(cmd: &NaCommand) -> Result<String, NashellError> {
+pub fn execute_read(cmd: &NaCommand) -> Result<String, NashellError> {
     let path_str = cmd.args.first().ok_or_else(|| NashellError::Execute {
-        command: "open".to_string(),
+        command: "read".to_string(),
         exit_code: None,
         stderr: "缺少路径参数".to_string(),
     })?;
@@ -339,7 +339,7 @@ pub fn execute_open(cmd: &NaCommand) -> Result<String, NashellError> {
 
     if !file_path.exists() {
         return Err(NashellError::Execute {
-            command: "open".to_string(),
+            command: "read".to_string(),
             exit_code: None,
             stderr: format!("路径不存在: {}", file_path.display()),
         });
@@ -348,7 +348,7 @@ pub fn execute_open(cmd: &NaCommand) -> Result<String, NashellError> {
     if file_path.is_dir() {
         if has_file_only_options(&cmd.args) {
             return Err(NashellError::Execute {
-                command: "open".to_string(),
+                command: "read".to_string(),
                 exit_code: None,
                 stderr: "目录模式下不支持 --start/--end 参数，--limit/-l 控制递归深度".to_string(),
             });
@@ -357,11 +357,11 @@ pub fn execute_open(cmd: &NaCommand) -> Result<String, NashellError> {
         let tree = generate_dir_tree(&file_path, "", true, 1, max_depth);
         Ok(tree)
     } else {
-        let (limit, start, end) = parse_open_options(&cmd.args)?;
+        let (limit, start, end) = parse_read_options(&cmd.args)?;
         read_file_with_options(&file_path, limit, start, end)
     }
 }
 
 #[cfg(test)]
-#[path = "open_tests.rs"]
+#[path = "read_tests.rs"]
 mod tests;

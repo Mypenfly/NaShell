@@ -9,6 +9,8 @@ A "pseudo-shell" built atop existing shells (nushell/bash), designed for both hu
 - **Dual-mode execution** — direct terminal mode for interactive TUI programs, captured PTY mode for pipelines and formatted output.
 - **Plugin system** — NDJSON-based communication protocol, streaming output, toExec delegation, broadcast events.
 - **Async shells** — background execution via `@/Async(name)`, with independent shell environments and output pools.
+- **Rich error handling** — NaCommand-level format validation, level checking, fuzzy command suggestions with green ANSI hints.
+- **Signal handling** — SIGINT (Ctrl+C) for command interruption, double Ctrl+C for force quit, graceful shutdown on SIGTERM/SIGHUP.
 
 ## Quick Start
 
@@ -69,7 +71,7 @@ NaShell Process
 | Command | Level | Description |
 |---------|-------|-------------|
 | `!@Write:` | Normal | Write file content. `path` from args, content from `@/` long-argument. |
-| `!@Open:` | Normal | Open file or directory. Syntax highlighting for files, tree view for dirs. |
+| `!@Read:` | Normal | Read file or directory. Syntax highlighting for files, tree view for dirs. |
 | `!!@Bash:` | System | Execute via `bash -c`. Highest parse priority, bypasses all other rules. |
 | `!!@Shell:` | System | Manage shell threads. Modes: (default), Watch, Destroy, Switch. |
 | `!@NaCmds:` | System | List all registered commands. Modes: (default table), Detail (with help), `-j/--json`. |
@@ -195,9 +197,10 @@ src/
 ├── main.rs              # Entry point, init, REPL launch
 ├── constants.rs         # All named constants
 ├── repl/
-│   ├── mod.rs           # REPL loop, mode dispatch, broadcast
+│   ├── mod.rs           # REPL loop, mode dispatch, broadcast, cleanup
 │   ├── input.rs         # Multi-line input collection
-│   └── prompt.rs        # Prompt rendering with ANSI colors
+│   ├── prompt.rs        # Prompt rendering with ANSI colors
+│   └── signals.rs       # Signal handlers (SIGINT, SIGTERM, SIGHUP)
 ├── parser/
 │   ├── mod.rs           # Parse entry: string → RawCommands
 │   ├── lexer.rs         # Tokenizer: prefixes, pipes, quotes
@@ -215,7 +218,7 @@ src/
 │   ├── external.rs      # External config command execution (Phase 8)
 │   └── builtin/
 │       ├── write.rs     # Write command
-│       ├── open.rs      # Open command (syntax highlighting)
+│       ├── read.rs      # Read command (syntax highlighting)
 │       ├── bash.rs      # Bash command (!!@Bash:)
 │       ├── shell_cmd.rs # Shell management (!!@Shell:)
 │       └── na_cmds.rs   # Command registry listing (!@NaCmds:)
@@ -253,7 +256,7 @@ src/
 | `rustyline` | REPL line editing with history |
 | `kdl-rs` | KDL configuration parsing |
 | `serde` + `serde_json` | JSON serialization (config, plugins) |
-| `syntect` | Syntax highlighting for Open command |
+| `syntect` | Syntax highlighting for Read command |
 | `portable-pty` | PTY pseudo-terminal management |
 | `libc` | Unix signal handling |
 | `tokio` | Async runtime (future phases) |
@@ -263,7 +266,7 @@ src/
 ## Development
 
 ```bash
-# Run all tests (306 tests)
+# Run all tests (330 tests)
 cargo test
 
 # Lint

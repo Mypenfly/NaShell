@@ -153,13 +153,31 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, NashellError> {
                 cmd.push(chars[i]);
                 i += 1;
             }
-            if !cmd.is_empty() {
-                tokens.push(Token::Word(cmd));
+            if cmd.is_empty() {
+                return Err(NashellError::NaFormatError {
+                    input: input.to_string(),
+                    detail: "缺少命令名 —— NaCommand 格式应为 !!@命令名:<参数>".to_string(),
+                    hint: "正确格式: !!@命令名:<参数>".to_string(),
+                    cmd_name: None,
+                    used_prefix: Some("!!@".to_string()),
+                });
+            }
+            tokens.push(Token::Word(cmd.clone()));
+            // 检查是否有冒号，没有则报格式错误
+            if i >= len || chars[i] != ':' {
+                return Err(NashellError::NaFormatError {
+                    input: input.to_string(),
+                    detail: format!(
+                        "缺少冒号 ':' —— NaCommand 格式应为 !!@{}:<参数>",
+                        cmd
+                    ),
+                    hint: format!("正确格式: !!@{}:<参数>", cmd),
+                    cmd_name: Some(cmd),
+                    used_prefix: Some("!!@".to_string()),
+                });
             }
             // 跳过 :
-            if i < len && chars[i] == ':' {
-                i += 1;
-            }
+            i += 1;
             continue;
         }
 
@@ -172,12 +190,31 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, NashellError> {
                 cmd.push(chars[i]);
                 i += 1;
             }
-            if !cmd.is_empty() {
-                tokens.push(Token::Word(cmd));
+            if cmd.is_empty() {
+                return Err(NashellError::NaFormatError {
+                    input: input.to_string(),
+                    detail: "缺少命令名 —— NaCommand 格式应为 !@命令名:<参数>".to_string(),
+                    hint: "正确格式: !@命令名:<参数>".to_string(),
+                    cmd_name: None,
+                    used_prefix: Some("!@".to_string()),
+                });
             }
-            if i < len && chars[i] == ':' {
-                i += 1;
+            tokens.push(Token::Word(cmd.clone()));
+            // 检查是否有冒号，没有则报格式错误
+            if i >= len || chars[i] != ':' {
+                return Err(NashellError::NaFormatError {
+                    input: input.to_string(),
+                    detail: format!(
+                        "缺少冒号 ':' —— NaCommand 格式应为 !@{}:<参数>",
+                        cmd
+                    ),
+                    hint: format!("正确格式: !@{}:<参数>", cmd),
+                    cmd_name: Some(cmd),
+                    used_prefix: Some("!@".to_string()),
+                });
             }
+            // 跳过 :
+            i += 1;
             continue;
         }
 
@@ -415,5 +452,70 @@ mod tests {
     fn test_tokenize_unclosed_quote() {
         let result = tokenize("echo \"hello world");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_tokenize_missing_colon_system() {
+        let result = tokenize("!!@Bash ls");
+        assert!(result.is_err());
+        match result {
+            Err(NashellError::NaFormatError { input: _, detail, hint: _, cmd_name, used_prefix }) => {
+                assert!(detail.contains("缺少冒号"));
+                assert!(detail.contains("Bash"));
+                assert_eq!(cmd_name, Some("Bash".to_string()));
+                assert_eq!(used_prefix, Some("!!@".to_string()));
+            }
+            _ => panic!("expected NaFormatError"),
+        }
+    }
+
+    #[test]
+    fn test_tokenize_missing_colon_normal() {
+        let result = tokenize("!@Write test.txt");
+        assert!(result.is_err());
+        match result {
+            Err(NashellError::NaFormatError { input: _, detail, hint: _, cmd_name, used_prefix }) => {
+                assert!(detail.contains("缺少冒号"));
+                assert!(detail.contains("Write"));
+                assert_eq!(cmd_name, Some("Write".to_string()));
+                assert_eq!(used_prefix, Some("!@".to_string()));
+            }
+            _ => panic!("expected NaFormatError"),
+        }
+    }
+
+    #[test]
+    fn test_tokenize_no_command_name_system() {
+        let result = tokenize("!!@ ");
+        assert!(result.is_err());
+        match result {
+            Err(NashellError::NaFormatError { input: _, detail, hint: _, cmd_name: _, used_prefix }) => {
+                assert!(detail.contains("缺少命令名"));
+                assert_eq!(used_prefix, Some("!!@".to_string()));
+            }
+            _ => panic!("expected NaFormatError"),
+        }
+    }
+
+    #[test]
+    fn test_tokenize_no_command_name_normal() {
+        let result = tokenize("!@ ");
+        assert!(result.is_err());
+        match result {
+            Err(NashellError::NaFormatError { input: _, detail, hint: _, cmd_name: _, used_prefix }) => {
+                assert!(detail.contains("缺少命令名"));
+                assert_eq!(used_prefix, Some("!@".to_string()));
+            }
+            _ => panic!("expected NaFormatError"),
+        }
+    }
+
+    #[test]
+    fn test_tokenize_valid_nacommand_no_error() {
+        let result = tokenize("!@Bash: ls");
+        assert!(result.is_ok());
+        let tokens = result.unwrap();
+        assert_eq!(tokens[0], Token::NormalPrefix);
+        assert_eq!(tokens[1], Token::Word("Bash".to_string()));
     }
 }

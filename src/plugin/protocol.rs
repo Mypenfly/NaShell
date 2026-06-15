@@ -29,6 +29,37 @@ pub struct PluginCall {
     pub long_argument: Option<String>,
 }
 
+/// 插件 toExec 请求，描述要求主程序代为执行的命令列表。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToExec {
+    /// 要执行的命令语句列表
+    pub execs: Vec<String>,
+    /// 是否将执行结果打印到终端显示给用户（默认 true）
+    #[serde(default = "default_true")]
+    pub is_print: bool,
+    /// 单条命令执行超时秒数（默认 90 秒）
+    #[serde(default = "default_toexec_timeout")]
+    pub timeout: u64,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_toexec_timeout() -> u64 {
+    90
+}
+
+impl Default for ToExec {
+    fn default() -> Self {
+        ToExec {
+            execs: Vec::new(),
+            is_print: true,
+            timeout: 90,
+        }
+    }
+}
+
 /// 插件发给主程序的 response 消息
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginResponse {
@@ -43,9 +74,9 @@ pub struct PluginResponse {
     pub prompt_fg: String,
     /// 是否实时打印
     pub is_print: bool,
-    /// 要求主程序代为执行的命令列表
+    /// 要求主程序代为执行的命令（含执行选项）
     #[serde(default)]
-    pub to_exec: Vec<String>,
+    pub to_exec: Option<ToExec>,
     /// to_exec 的执行结果（由主程序填充后发回）
     pub exec_result: Option<Vec<String>>,
     /// 交互式输入请求
@@ -64,7 +95,7 @@ impl Default for PluginResponse {
             out_prompt: None,
             prompt_fg: "gray".to_string(),
             is_print: false,
-            to_exec: Vec::new(),
+            to_exec: None,
             exec_result: None,
             get_input: None,
             user_input: None,
@@ -75,9 +106,9 @@ impl Default for PluginResponse {
 /// 插件发给主程序的 off 消息
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginOff {
-    /// 关闭前要求执行的命令列表
+    /// 关闭前要求执行的命令（含执行选项）
     #[serde(default)]
-    pub to_exec: Vec<String>,
+    pub to_exec: Option<ToExec>,
     /// 最终输出内容
     pub out_content: String,
     /// 输出提示符
@@ -92,7 +123,7 @@ pub struct PluginOff {
 impl Default for PluginOff {
     fn default() -> Self {
         PluginOff {
-            to_exec: Vec::new(),
+            to_exec: None,
             out_content: String::new(),
             out_prompt: None,
             prompt_fg: "gray".to_string(),
@@ -279,7 +310,11 @@ mod tests {
             out_content: "Hello World".to_string(),
             out_prompt: Some("@agent #>>".to_string()),
             is_print: true,
-            to_exec: vec!["ls -la".to_string()],
+            to_exec: Some(ToExec {
+                execs: vec!["ls -la".to_string()],
+                is_print: true,
+                timeout: 90,
+            }),
             exec_result: None,
             prompt_fg: "gray".to_string(),
             get_input: None,
@@ -291,7 +326,10 @@ mod tests {
         assert_eq!(parsed.out_content, "Hello World");
         assert_eq!(parsed.out_prompt.as_deref(), Some("@agent #>>"));
         assert!(parsed.is_print);
-        assert_eq!(parsed.to_exec, vec!["ls -la"]);
+        let te = parsed.to_exec.unwrap();
+        assert_eq!(te.execs, vec!["ls -la"]);
+        assert!(te.is_print);
+        assert_eq!(te.timeout, 90);
         assert!(parsed.exec_result.is_none());
     }
 
@@ -302,7 +340,11 @@ mod tests {
             out_content: String::new(),
             out_prompt: None,
             is_print: false,
-            to_exec: vec!["echo hello".to_string()],
+            to_exec: Some(ToExec {
+                execs: vec!["echo hello".to_string()],
+                is_print: false,
+                timeout: 30,
+            }),
             exec_result: Some(vec!["hello".to_string()]),
             prompt_fg: "gray".to_string(),
             get_input: None,
@@ -317,7 +359,7 @@ mod tests {
     #[test]
     fn test_plugin_off_serialization() {
         let off = PluginOff {
-            to_exec: vec![],
+            to_exec: None,
             out_content: "done".to_string(),
             out_prompt: Some("@agent #>>".to_string()),
             prompt_fg: "gray".to_string(),
@@ -325,7 +367,7 @@ mod tests {
         };
         let json = serde_json::to_string(&off).unwrap();
         let parsed: PluginOff = serde_json::from_str(&json).unwrap();
-        assert!(parsed.to_exec.is_empty());
+        assert!(parsed.to_exec.is_none());
         assert_eq!(parsed.out_content, "done");
         assert!(parsed.is_print);
     }
@@ -333,7 +375,11 @@ mod tests {
     #[test]
     fn test_plugin_off_with_to_exec() {
         let off = PluginOff {
-            to_exec: vec!["echo cleanup".to_string()],
+            to_exec: Some(ToExec {
+                execs: vec!["echo cleanup".to_string()],
+                is_print: true,
+                timeout: 60,
+            }),
             out_content: String::new(),
             out_prompt: None,
             prompt_fg: "gray".to_string(),
@@ -341,7 +387,28 @@ mod tests {
         };
         let json = serde_json::to_string(&off).unwrap();
         let parsed: PluginOff = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.to_exec, vec!["echo cleanup"]);
+        let te = parsed.to_exec.unwrap();
+        assert_eq!(te.execs, vec!["echo cleanup"]);
+        assert!(te.is_print);
+        assert_eq!(te.timeout, 60);
+    }
+
+    #[test]
+    fn test_to_exec_default() {
+        let json = r#"{"execs":["ls"]}"#;
+        let te: ToExec = serde_json::from_str(json).unwrap();
+        assert_eq!(te.execs, vec!["ls"]);
+        assert!(te.is_print);
+        assert_eq!(te.timeout, 90);
+    }
+
+    #[test]
+    fn test_to_exec_no_print() {
+        let json = r#"{"execs":["ls"],"is_print":false,"timeout":30}"#;
+        let te: ToExec = serde_json::from_str(json).unwrap();
+        assert_eq!(te.execs, vec!["ls"]);
+        assert!(!te.is_print);
+        assert_eq!(te.timeout, 30);
     }
 
     #[test]
@@ -387,7 +454,7 @@ mod tests {
                 out_content: "Hello".to_string(),
                 out_prompt: None,
                 is_print: true,
-                to_exec: vec![],
+                to_exec: None,
                 exec_result: None,
                 prompt_fg: "gray".to_string(),
                 get_input: None,
@@ -404,7 +471,7 @@ mod tests {
         let msg = PluginMessage::Off {
             sender: "agent".to_string(),
             data: PluginOff {
-                to_exec: vec![],
+                to_exec: None,
                 out_content: "done".to_string(),
                 out_prompt: Some("@agent #>>".to_string()),
                 prompt_fg: "gray".to_string(),
@@ -450,7 +517,11 @@ mod tests {
                 out_content: "result".to_string(),
                 out_prompt: Some("@plugin #>>".to_string()),
                 is_print: true,
-                to_exec: vec!["echo done".to_string()],
+                to_exec: Some(ToExec {
+                    execs: vec!["echo done".to_string()],
+                    is_print: true,
+                    timeout: 90,
+                }),
                 exec_result: Some(vec!["done".to_string()]),
                 prompt_fg: "gray".to_string(),
                 get_input: None,
@@ -507,13 +578,14 @@ mod tests {
             out_content: "output".to_string(),
             out_prompt: None,
             is_print: false,
-            to_exec: vec![],
+            to_exec: None,
             exec_result: None,
             prompt_fg: "gray".to_string(),
             get_input: None,
             user_input: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
-        assert!(json.contains("\"to_exec\":[]"));
+        let parsed: PluginResponse = serde_json::from_str(&json).unwrap();
+        assert!(parsed.to_exec.is_none());
     }
 }

@@ -18,7 +18,7 @@ use crate::shell::manager::ShellManager;
 ///
 /// 查表找到对应的命令处理器并执行。
 /// 当 mode 为 "help" 时返回帮助信息。
-/// 当前支持的内置命令：write, open, bash, shell。
+/// 当前支持的内置命令：write, read, bash, shell。
 /// 插件命令通过 PluginManager 的 call/response/off 协议执行。
 /// 配置命令通过 external 模块执行外部程序。
 ///
@@ -114,19 +114,29 @@ pub fn execute_nacommand(
                 let _ = writeln!(out_writer, "{}", off.out_content);
             }
             // Execute off to_exec commands
-            if !off.to_exec.is_empty() {
-                let exec_results = crate::plugin::toexec::execute_toplevel(
-                    &off.to_exec,
-                    1,
-                    shell_type,
-                    timeout_secs,
-                    deny_patterns,
-                    registry,
-                    shell_manager,
-                )?;
-                for result in exec_results {
-                    if !result.is_empty() {
-                        let _ = writeln!(out_writer, "{}", result);
+            if let Some(ref to_exec) = off.to_exec {
+                if !to_exec.execs.is_empty() {
+                    for cmd_line in &to_exec.execs {
+                        let exec_hint = crate::repl::prompt::colorize(
+                            &format!("@{} exec > {}", plugin_name, cmd_line),
+                            "green",
+                        );
+                        let _ = writeln!(out_writer, "{}", exec_hint);
+                    }
+                    let exec_results = crate::plugin::toexec::execute_toplevel(
+                        &to_exec.execs,
+                        1,
+                        shell_type,
+                        to_exec.timeout,
+                        deny_patterns,
+                        registry,
+                        shell_manager,
+                        to_exec.is_print,
+                    )?;
+                    for result in exec_results {
+                        if !result.is_empty() {
+                            let _ = writeln!(out_writer, "{}", result);
+                        }
                     }
                 }
             }
@@ -147,6 +157,7 @@ pub fn execute_nacommand(
 
     Err(NashellError::CommandNotFound {
         name: cmd.cmd.clone(),
+        suggestion: None,
     })
 }
 
@@ -171,11 +182,11 @@ fn execute_builtin(
             }
             builtin::write::execute_write(cmd)
         }
-        "open" => {
+        "read" => {
             if cmd.mode.as_deref().map_or(false, |m| m == "help") {
-                return registry.get_help("open", Some("help"));
+                return registry.get_help("read", Some("help"));
             }
-            builtin::open::execute_open(cmd)
+            builtin::read::execute_read(cmd)
         }
         "bash" => {
             if cmd.mode.as_deref().map_or(false, |m| m == "help") {
@@ -202,6 +213,7 @@ fn execute_builtin(
         }
         _ => Err(NashellError::CommandNotFound {
             name: cmd.cmd.clone(),
+            suggestion: None,
         }),
     }
 }
@@ -258,8 +270,8 @@ mod tests {
         });
         registry.builtin_cmds.push(CmdMeta {
             level: Level::Normal,
-            name: "open".to_string(),
-            exec: "n_open".to_string(),
+            name: "read".to_string(),
+            exec: "n_read".to_string(),
             long_argument: false,
             exec_script: None,
             known_modes: vec!["help".to_string()],
@@ -291,7 +303,7 @@ mod tests {
     }
 
     #[test]
-    fn test_execute_open_command() {
+    fn test_execute_read_command() {
         let dir = setup_temp_dir();
         let file_path = dir.join("test.txt");
         let mut f = std::fs::File::create(&file_path).unwrap();
@@ -301,7 +313,7 @@ mod tests {
 
         let cmd = NaCommand {
             level: NaLevel::Normal,
-            cmd: "open".to_string(),
+            cmd: "read".to_string(),
             mode: None,
             args: vec![file_path.to_string_lossy().to_string()],
             long_argument: None,
@@ -347,7 +359,7 @@ mod tests {
         let result = execute_nacommand(&cmd, None, &registry, None, 120, None, "bash", &[], &mut out_buf, None);
         assert!(result.is_err());
         match result {
-            Err(NashellError::CommandNotFound { name }) => {
+            Err(NashellError::CommandNotFound { name, suggestion: _ }) => {
                 assert_eq!(name, "unknown");
             }
             _ => panic!("expected CommandNotFound error"),
@@ -374,12 +386,12 @@ mod tests {
     }
 
     #[test]
-    fn test_execute_help_mode_open() {
+    fn test_execute_help_mode_read() {
         let registry = test_registry();
 
         let cmd = NaCommand {
             level: NaLevel::Normal,
-            cmd: "open".to_string(),
+            cmd: "read".to_string(),
             mode: Some("help".to_string()),
             args: vec![],
             long_argument: None,
@@ -387,7 +399,7 @@ mod tests {
 
         let mut out_buf = Vec::new();
         let result = execute_nacommand(&cmd, None, &registry, None, 120, None, "bash", &[], &mut out_buf, None).unwrap();
-        assert!(result.contains("Open"));
+        assert!(result.contains("Read"));
         assert!(result.contains("打开文件"));
     }
 }

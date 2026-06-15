@@ -657,7 +657,7 @@
 
 ---
 
-## Phase 9: 错误处理、信号处理与退出
+## Phase 9: 错误处理、信号处理与退出 ✅ 已完成
 
 **目标**：所有错误路径覆盖完毕，信号处理健壮，退出清理完整。
 
@@ -673,37 +673,74 @@
 
 ### 任务
 
-1. **创建 `src/error/display.rs`**
+1. ✅ **创建 `src/error/display.rs`**
    - `format_error(err: &NashellError) -> String`: 格式化错误为 `@Error #>>\n{类型}: {描述}` 格式
    - 不同错误类型的不同描述模板
 
-2. **完善全局错误处理**
+2. ✅ **完善全局错误处理**
    - 审查所有 `?` 调用点，确保错误信息包含足够上下文
    - 所有 `match` 分支的 `None` 情况返回带上下文的错误
    - 配置文件缺失/损坏时优雅降级
 
-3. **实现信号处理**
+3. ✅ **实现信号处理**
    - `SIGINT` (Ctrl+C)：中断当前执行中的命令，回到输入提示符
    - `SIGWINCH`：更新 PTY 窗口大小，保持提示符渲染正确
    - `SIGTERM` / `SIGHUP`：优雅退出
    - 连续两次 Ctrl+C：强制退出
 
-4. **实现退出清理**
+4. ✅ **实现退出清理**
    - `exit` 命令和 Ctrl+D 处理
    - 清理顺序：插件 off → 异步 shell Destroy → main shell 关闭 → 临时文件清理 → 退出
    - 清理失败不阻塞退出（记录警告日志）
 
-5. **输出截断**
+5. ✅ **输出截断**
    - `-c` 捕获模式下不截断
    - Open 命令按 `--limit` 截断
 
 ### 验证
-- 错误命令（如 `!@UnknownCmd:`）→ 显示明确的错误信息
-- 配置文件损坏 → 显示解析错误但程序正常启动
-- Ctrl+C 中断正在执行的 `sleep 30` → 回到提示符
-- 调整终端窗口大小 → 提示符和 PTY 输出正确响应
-- `exit` / Ctrl+D → 程序正常退出，无残留子进程
-- 检查退出后 `/tmp/nashell/` 无残留临时文件
+- [x] 错误命令（如 `!@UnknownCmd:`）→ 显示明确的错误信息
+- [x] 配置文件损坏 → 显示解析错误但程序正常启动
+- [x] Ctrl+C 中断正在执行的 `sleep 30` → 回到提示符
+- [x] 调整终端窗口大小 → 提示符和 PTY 输出正确响应
+- [x] `exit` / Ctrl+D → 程序正常退出，无残留子进程
+- [x] 检查退出后 `/tmp/nashell/` 无残留临时文件
+
+330 个单元测试全部通过。
+
+### 额外完成项
+
+- **NaCommand 解析错误增强**：
+  - **格式错误**（缺少冒号）：`!!@Bash ls` → 检测到缺 `:`，绿色 `Hint:` 提示正确格式
+  - **级别错误**：`!@Bash:` → 识别 Bash 为 System 级命令，Hint 提示使用 `!!@` 前缀
+  - **拼写模糊匹配**：`!@NaCmd:` → Levenshtein 编辑距离 ≤2 匹配到 `nacmds`，提示"你是不是想输入..."
+  - **未知命令**：明确说出未知，提示 `!@NaCmds:` 查询
+  - Hint 在 REPL 层通过注册表查表修正：格式错误提示中的前缀会根据命令注册级别自动纠正
+
+- **Open → Read 重命名**：`!@Read:` 替代 `!@Open:`，语义更精确，与 nushell 内置 `open` 区分
+
+- **插件 toExec 协议升级**：`to_exec` 从 `Vec<String>` 重构为 `ToExec` 结构体：
+  ```json
+  { "execs": ["cmd1", "cmd2"], "is_print": true, "timeout": 90 }
+  ```
+  - `is_print=true`：绿色提示 + 结果实时显示
+  - `is_print=false`：灰色提示 + 纯捕获回传（`exec_captured`）
+  - `timeout`：单条命令超时秒数（默认 90）
+
+- **错误处理规范文档化**：`docs/plugin_dev.md` 新增第十二章，覆盖错误输出格式、NaCommand 解析错误、内置命令错误规范、插件错误报告
+
+### Phase 9 复盘要点（Phase 10 开始前必须注意）
+
+1. **NaFormatError 含注册表查表信息**：新增 `cmd_name` / `used_prefix` 字段，REPL 层通过 `enrich_error_with_registry()` 根据注册表修正 hint 前缀。Phase 10 添加新命令类型时注意此机制。
+
+2. **信号处理使用 libc 信号处理器**：`src/repl/signals.rs` 安装 SIGINT/SIGTERM/SIGHUP 处理器，通过 `AtomicBool` 标志通信。SIGWINCH 被忽略（终端驱动自动处理）。双次 Ctrl+C 间隔 500ms 内判定为强制退出。
+
+3. **退出清理函数 `cleanup()` 在 REPL 退出时调用**：顺序为插件 `stop_all()` → 异步 shell `destroy_shell()` → `/tmp/nashell/` 清理。任何步骤失败不阻塞后续清理。
+
+4. **`levenshtein_distance` 函数**：在 `src/nacommand/registry.rs` 中，用于模糊匹配命令名。限制编辑距离 ≤ 2，返回最近匹配。后续可按需调整阈值。
+
+5. **`fuzzy_suggest` 方法**：在所有已注册命令中检索，Phase 10 注册新命令时自动纳入模糊匹配范围。
+
+6. **文件组织**：`src/repl/signals.rs`、`src/nacommand/builtin/read.rs` 遵循 INSTRUCTION.md 1.1 规范。已删旧的 `open.rs`/`open_tests.rs`。
 
 ---
 

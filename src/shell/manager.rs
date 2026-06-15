@@ -124,6 +124,7 @@ impl ShellManager {
             .get_mut(shell_id)
             .ok_or_else(|| NashellError::CommandNotFound {
                 name: shell_id.to_string(),
+                suggestion: None,
             })?;
         shell.pools.push(output.to_string());
         Ok(())
@@ -136,6 +137,7 @@ impl ShellManager {
             .get_mut(shell_id)
             .ok_or_else(|| NashellError::CommandNotFound {
                 name: shell_id.to_string(),
+                suggestion: None,
             })?;
         shell.join_handle = Some(handle);
         Ok(())
@@ -155,6 +157,7 @@ impl ShellManager {
             .get(shell_id)
             .ok_or_else(|| NashellError::CommandNotFound {
                 name: shell_id.to_string(),
+                suggestion: None,
             })?;
 
         let total = shell.pools.len();
@@ -182,6 +185,7 @@ impl ShellManager {
             .get_mut(shell_id)
             .ok_or_else(|| NashellError::CommandNotFound {
                 name: shell_id.to_string(),
+                suggestion: None,
             })?;
 
         if shell.name == "main" {
@@ -240,11 +244,13 @@ impl ShellManager {
             let main_shell = self.shells.get(&main_id).ok_or_else(|| {
                 NashellError::CommandNotFound {
                     name: main_id.clone(),
+                    suggestion: None,
                 }
             })?;
             let target_shell = self.shells.get(shell_id).ok_or_else(|| {
                 NashellError::CommandNotFound {
                     name: shell_id.to_string(),
+                    suggestion: None,
                 }
             })?;
 
@@ -258,6 +264,7 @@ impl ShellManager {
             let target_shell = self.shells.get_mut(shell_id).ok_or_else(|| {
                 NashellError::CommandNotFound {
                     name: shell_id.to_string(),
+                    suggestion: None,
                 }
             })?;
             target_shell.name = "main".to_string();
@@ -271,6 +278,7 @@ impl ShellManager {
             let old_main = self.shells.get_mut(&main_id).ok_or_else(|| {
                 NashellError::CommandNotFound {
                     name: main_id.clone(),
+                    suggestion: None,
                 }
             })?;
             old_main.name = target_name.clone();

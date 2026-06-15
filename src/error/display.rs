@@ -1,5 +1,15 @@
 use crate::error::NashellError;
 
+/// ANSI 绿色前景色转义码（用于 Hint 提示）。
+const GREEN: &str = "\x1b[32m";
+/// ANSI 重置码。
+const RESET: &str = "\x1b[0m";
+
+/// 为文本包裹绿色前景色。
+fn green(text: &str) -> String {
+    format!("{}{}{}", GREEN, text, RESET)
+}
+
 /// 将 NashellError 格式化为 NaShell 统一错误输出格式。
 ///
 /// 格式：`@Error #>>\n{类型}: {描述}`
@@ -23,7 +33,7 @@ use crate::error::NashellError;
 /// # 示例
 /// ```
 /// use nashell::error::NashellError;
-/// let err = NashellError::CommandNotFound { name: "unknown".into() };
+/// let err = NashellError::CommandNotFound { name: "unknown".into(), suggestion: None };
 /// let formatted = nashell::error::display::format_error(&err);
 /// assert!(formatted.starts_with("@Error #>>"));
 /// ```
@@ -62,8 +72,21 @@ pub fn format_error(err: &NashellError) -> String {
         } => {
             ("插件错误", format!("插件 '{}': {}", plugin_name, detail))
         }
-        NashellError::CommandNotFound { name } => {
-            ("命令未找到", format!("找不到命令 '{}'", name))
+        NashellError::CommandNotFound { name, suggestion } => {
+            let mut desc = format!("找不到命令 '{}'", name);
+            if let Some(ref sug) = suggestion {
+                desc.push_str(&format!(
+                    "\n{} 你是不是想输入 '{}' ？",
+                    green("Hint:"),
+                    green(sug)
+                ));
+            }
+            desc.push_str(&format!(
+                "\n{} 使用 {} 查询所有已注册命令",
+                green("Hint:"),
+                green("!@NaCmds:")
+            ));
+            ("命令未找到", desc)
         }
         NashellError::Timeout { command, seconds } => {
             (
@@ -73,6 +96,30 @@ pub fn format_error(err: &NashellError) -> String {
         }
         NashellError::SafetyBlocked { command, reason } => {
             ("安全拦截", format!("命令 '{}' 被拦截: {}", command, reason))
+        }
+        NashellError::NaLevelError {
+            command,
+            used_level,
+            expected_level,
+        } => {
+            let hint = format!(
+                "\n{} 请使用 {} 前缀调用此命令（正确格式: {}{}:<args>）",
+                green("Hint:"),
+                green(expected_level),
+                expected_level,
+                command
+            );
+            (
+                "调用级别错误",
+                format!(
+                    "命令 '{}' 是 {} 级命令，但使用了 {} 前缀{}",
+                    command, expected_level, used_level, hint
+                ),
+            )
+        }
+        NashellError::NaFormatError { input: _, detail, hint, .. } => {
+            let hint_text = format!("\n{} {}", green("Hint:"), green(hint));
+            ("NaCommand 格式错误", format!("{}{}", detail, hint_text))
         }
     };
 
@@ -125,12 +172,25 @@ mod tests {
     fn test_format_command_not_found() {
         let err = NashellError::CommandNotFound {
             name: "unknown_cmd".into(),
+            suggestion: None,
         };
         let formatted = format_error(&err);
-        assert_eq!(
-            formatted,
-            "@Error #>>\n命令未找到: 找不到命令 'unknown_cmd'"
-        );
+        assert!(formatted.starts_with("@Error #>>\n命令未找到:"));
+        assert!(formatted.contains("unknown_cmd"));
+        assert!(formatted.contains("!@NaCmds:"));
+    }
+
+    #[test]
+    fn test_format_command_not_found_with_suggestion() {
+        let err = NashellError::CommandNotFound {
+            name: "NaCmd".into(),
+            suggestion: Some("nacmds".into()),
+        };
+        let formatted = format_error(&err);
+        assert!(formatted.contains("NaCmd"));
+        assert!(formatted.contains("nacmds"));
+        assert!(formatted.contains("你是不是想输入"));
+        assert!(formatted.contains("!@NaCmds:"));
     }
 
     #[test]
@@ -176,5 +236,34 @@ mod tests {
         let formatted = format_error(&err);
         assert!(formatted.starts_with("@Error #>>\nIO 错误:"));
         assert!(formatted.contains("/tmp/test"));
+    }
+
+    #[test]
+    fn test_format_na_level_error() {
+        let err = NashellError::NaLevelError {
+            command: "bash".into(),
+            used_level: "!@".into(),
+            expected_level: "!!@".into(),
+        };
+        let formatted = format_error(&err);
+        assert!(formatted.starts_with("@Error #>>\n调用级别错误:"));
+        assert!(formatted.contains("bash"));
+        assert!(formatted.contains("Hint:"));
+        assert!(formatted.contains("!!@"));
+    }
+
+    #[test]
+    fn test_format_na_format_error() {
+        let err = NashellError::NaFormatError {
+            input: "!!@Bash ls".into(),
+            detail: "缺少冒号 ':' —— NaCommand 格式应为 <prefix>命令名:<参数>".into(),
+            hint: "正确格式: !!@Bash:<bash 参数>".into(),
+            cmd_name: Some("Bash".into()),
+            used_prefix: Some("!!@".into()),
+        };
+        let formatted = format_error(&err);
+        assert!(formatted.starts_with("@Error #>>\nNaCommand 格式错误:"));
+        assert!(formatted.contains("缺少冒号"));
+        assert!(formatted.contains("Hint:"));
     }
 }

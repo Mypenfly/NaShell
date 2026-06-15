@@ -10,6 +10,8 @@
 - **双模执行** — 直连终端模式（交互式 TUI 程序）、Captured PTY 模式（管道传递和格式化输出）。
 - **插件系统** — 基于 NDJSON 的通信协议，支持流式输出、toExec 委托、广播事件。
 - **异步 Shell** — `@/Async(name)` 后台执行，独立 Shell 环境，输出积累到 pools。
+- **丰富错误处理** — NaCommand 格式校验、级别检查、模糊命令建议（绿色 ANSI 提示）。
+- **信号处理** — SIGINT (Ctrl+C) 中断命令，双次 Ctrl+C 强制退出，SIGTERM/SIGHUP 优雅关闭。
 
 ## 快速开始
 
@@ -39,7 +41,7 @@ NaShell 进程
 ├─ REPL 前端 (rustyline)
 │   ├─ 多行输入（@/ 截止符）
 │   ├─ ANSI 彩色提示符
-│   └─ 历史管理
+│   └─ 历史管理、信号处理、退出清理
 ├─ 命令解析器
 │   ├─ 词法分析: 识别 !@/!!@/@//管道/引号字符串
 │   ├─ 异步标记检测 (@/Async(name))
@@ -70,7 +72,7 @@ NaShell 进程
 | 命令 | 级别 | 说明 |
 |---------|-------|------|
 | `!@Write:` | Normal | 写入文件。路径来自参数，内容来自 `@/` 后的 long_argument。 |
-| `!@Open:` | Normal | 打开文件或目录。文件模式含语法高亮，目录模式显示结构树。 |
+| `!@Read:` | Normal | 读取文件或目录。文件模式含语法高亮，目录模式显示结构树。 |
 | `!!@Bash:` | System | 通过 `bash -c` 执行。解析优先级最高，跳过其他所有规则。 |
 | `!!@Shell:` | System | 管理 Shell 线程。模式：默认、Watch、Destroy、Switch。 |
 | `!@NaCmds:` | System | 列出所有已注册命令。模式：默认表格、Detail（含帮助）、`-j/--json`。 |
@@ -196,9 +198,10 @@ src/
 ├── main.rs              # 入口，初始化，启动 REPL
 ├── constants.rs         # 全部命名常量
 ├── repl/
-│   ├── mod.rs           # REPL 循环、模式判定、broadcast
+│   ├── mod.rs           # REPL 循环、模式判定、broadcast、退出清理
 │   ├── input.rs         # 多行输入收集
-│   └── prompt.rs        # ANSI 彩色提示符渲染
+│   ├── prompt.rs        # ANSI 彩色提示符渲染
+│   └── signals.rs       # 信号处理 (SIGINT/SIGTERM/SIGHUP)
 ├── parser/
 │   ├── mod.rs           # 解析入口: 字符串 → RawCommands
 │   ├── lexer.rs         # 词法分析: 前缀、管道、引号
@@ -216,7 +219,7 @@ src/
 │   ├── external.rs      # 外部配置命令执行 (Phase 8)
 │   └── builtin/
 │       ├── write.rs     # Write 命令
-│       ├── open.rs      # Open 命令（语法高亮）
+│       ├── read.rs      # Read 命令（语法高亮）
 │       ├── bash.rs      # Bash 命令 (!!@Bash:)
 │       ├── shell_cmd.rs # Shell 管理 (!!@Shell:)
 │       └── na_cmds.rs   # 命令注册表查询 (!@NaCmds:)
@@ -254,7 +257,7 @@ src/
 | `rustyline` | REPL 行编辑与历史 |
 | `kdl-rs` | KDL 配置文件解析 |
 | `serde` + `serde_json` | JSON 序列化（配置、插件通信） |
-| `syntect` | Open 命令语法高亮 |
+| `syntect` | Read 命令语法高亮 |
 | `portable-pty` | PTY 伪终端管理 |
 | `libc` | Unix 信号处理 |
 | `tokio` | 异步运行时（后续阶段） |
@@ -264,7 +267,7 @@ src/
 ## 开发
 
 ```bash
-# 运行全部测试（306 个）
+# 运行全部测试（330 个）
 cargo test
 
 # 代码检查

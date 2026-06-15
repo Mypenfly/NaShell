@@ -62,13 +62,13 @@ fn test_open_file_default_limit() {
 
     let cmd = NaCommand {
         level: NaLevel::Normal,
-        cmd: "open".to_string(),
+        cmd: "read".to_string(),
         mode: None,
         args: vec![file_path.to_string_lossy().to_string()],
         long_argument: None,
     };
 
-    let result = strip_ansi(&execute_open(&cmd).unwrap());
+    let result = strip_ansi(&execute_read(&cmd).unwrap());
     assert!(result.contains("1  line 1"));
     assert!(result.contains("10  line 10"));
     assert!(!result.contains("11  "));
@@ -81,7 +81,7 @@ fn test_open_file_with_limit() {
 
     let cmd = NaCommand {
         level: NaLevel::Normal,
-        cmd: "open".to_string(),
+        cmd: "read".to_string(),
         mode: None,
         args: vec![
             file_path.to_string_lossy().to_string(),
@@ -91,7 +91,7 @@ fn test_open_file_with_limit() {
         long_argument: None,
     };
 
-    let result = strip_ansi(&execute_open(&cmd).unwrap());
+    let result = strip_ansi(&execute_read(&cmd).unwrap());
     assert!(result.contains("1  line 1"));
     assert!(result.contains("3  line 3"));
     assert!(!result.contains("4  line 4"));
@@ -104,7 +104,7 @@ fn test_open_file_with_start() {
 
     let cmd = NaCommand {
         level: NaLevel::Normal,
-        cmd: "open".to_string(),
+        cmd: "read".to_string(),
         mode: None,
         args: vec![
             file_path.to_string_lossy().to_string(),
@@ -114,7 +114,7 @@ fn test_open_file_with_start() {
         long_argument: None,
     };
 
-    let result = strip_ansi(&execute_open(&cmd).unwrap());
+    let result = strip_ansi(&execute_read(&cmd).unwrap());
     assert!(!result.contains("4  line 4"));
     assert!(result.contains("5  line 5"));
 }
@@ -126,7 +126,7 @@ fn test_open_file_with_end() {
 
     let cmd = NaCommand {
         level: NaLevel::Normal,
-        cmd: "open".to_string(),
+        cmd: "read".to_string(),
         mode: None,
         args: vec![
             file_path.to_string_lossy().to_string(),
@@ -136,7 +136,7 @@ fn test_open_file_with_end() {
         long_argument: None,
     };
 
-    let result = strip_ansi(&execute_open(&cmd).unwrap());
+    let result = strip_ansi(&execute_read(&cmd).unwrap());
     assert!(result.contains("1  line 1"));
     assert!(result.contains("3  line 3"));
     assert!(!result.contains("4  line 4"));
@@ -149,7 +149,7 @@ fn test_open_file_with_long_flag() {
 
     let cmd = NaCommand {
         level: NaLevel::Normal,
-        cmd: "open".to_string(),
+        cmd: "read".to_string(),
         mode: None,
         args: vec![
             file_path.to_string_lossy().to_string(),
@@ -159,7 +159,7 @@ fn test_open_file_with_long_flag() {
         long_argument: None,
     };
 
-    let result = strip_ansi(&execute_open(&cmd).unwrap());
+    let result = strip_ansi(&execute_read(&cmd).unwrap());
     assert!(result.contains("1  line 1"));
     assert!(result.contains("2  line 2"));
     assert!(!result.contains("3  line 3"));
@@ -172,13 +172,13 @@ fn test_open_file_nonexistent() {
 
     let cmd = NaCommand {
         level: NaLevel::Normal,
-        cmd: "open".to_string(),
+        cmd: "read".to_string(),
         mode: None,
         args: vec![file_path.to_string_lossy().to_string()],
         long_argument: None,
     };
 
-    let result = execute_open(&cmd);
+    let result = execute_read(&cmd);
     assert!(result.is_err());
 }
 
@@ -186,13 +186,13 @@ fn test_open_file_nonexistent() {
 fn test_open_no_path_argument() {
     let cmd = NaCommand {
         level: NaLevel::Normal,
-        cmd: "open".to_string(),
+        cmd: "read".to_string(),
         mode: None,
         args: vec![],
         long_argument: None,
     };
 
-    let result = execute_open(&cmd);
+    let result = execute_read(&cmd);
     assert!(result.is_err());
 }
 
@@ -205,13 +205,13 @@ fn test_open_directory() {
 
     let cmd = NaCommand {
         level: NaLevel::Normal,
-        cmd: "open".to_string(),
+        cmd: "read".to_string(),
         mode: None,
         args: vec![test_dir.to_string_lossy().to_string()],
         long_argument: None,
     };
 
-    let result = execute_open(&cmd).unwrap();
+    let result = execute_read(&cmd).unwrap();
     assert!(result.contains("a.txt"));
     assert!(result.contains("subdir"));
     assert!(result.contains("b.txt"));
@@ -225,20 +225,20 @@ fn test_open_directory_with_depth_limit() {
     // 默认深度为 3，子目录内容应可见
     let cmd = NaCommand {
         level: NaLevel::Normal,
-        cmd: "open".to_string(),
+        cmd: "read".to_string(),
         mode: None,
         args: vec![test_dir.to_string_lossy().to_string()],
         long_argument: None,
     };
 
-    let result = execute_open(&cmd).unwrap();
+    let result = execute_read(&cmd).unwrap();
     assert!(result.contains("subdir"));
     assert!(result.contains("b.txt"));
 
     // 深度 1：只显示根目录内容，不展开子目录
     let cmd_shallow = NaCommand {
         level: NaLevel::Normal,
-        cmd: "open".to_string(),
+        cmd: "read".to_string(),
         mode: None,
         args: vec![
             test_dir.to_string_lossy().to_string(),
@@ -248,7 +248,7 @@ fn test_open_directory_with_depth_limit() {
         long_argument: None,
     };
 
-    let result_shallow = execute_open(&cmd_shallow).unwrap();
+    let result_shallow = execute_read(&cmd_shallow).unwrap();
     assert!(result_shallow.contains("a.txt"));
     assert!(!result_shallow.contains("b.txt"));
 }
@@ -262,7 +262,7 @@ fn test_open_invalid_limit() {
 
     let cmd = NaCommand {
         level: NaLevel::Normal,
-        cmd: "open".to_string(),
+        cmd: "read".to_string(),
         mode: None,
         args: vec![
             file_path.to_string_lossy().to_string(),
@@ -272,6 +272,6 @@ fn test_open_invalid_limit() {
         long_argument: None,
     };
 
-    let result = execute_open(&cmd);
+    let result = execute_read(&cmd);
     assert!(result.is_err());
 }

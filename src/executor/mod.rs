@@ -77,15 +77,22 @@ pub(crate) fn check_safety(command: &str, patterns: &[String]) -> Result<(), Nas
 /// - 若 args[0] 匹配 `known_modes` 中的模式（大小写不敏感），提取为 mode。
 /// - `known_modes` 为空且 args[0] 非 "help" 时不做提取，args 原样透传。
 ///
+/// **级别检查**：
+/// - 若用户使用 `!@` (Normal) 调用 System 级命令 → NaLevelError，提示使用 `!!@`
+/// - 若用户使用 `!!@` (System) 调用 Normal 级命令 → NaLevelError，提示使用 `!@`
+///
 /// # 参数
 /// - `cmd`: 解析后的命令
 /// - `long_argument`: 长参数内容
-/// - `registry`: 命令注册表（用于查已知 mode 列表）
+/// - `registry`: 命令注册表（用于查已知 mode 列表和级别检查）
+///
+/// # 错误
+/// - `NaLevelError`: 命令级别与调用前缀不匹配
 fn build_nacommand(
     cmd: &RawCmd,
     long_argument: Option<String>,
     registry: &CommandRegistry,
-) -> NaCommand {
+) -> Result<NaCommand, NashellError> {
     let level = match cmd.cmd_type {
         CmdType::NaCommandNormal => NaLevel::Normal,
         CmdType::NaCommandSystem => NaLevel::System,
@@ -94,9 +101,26 @@ fn build_nacommand(
 
     let lower_cmd = cmd.cmd.to_lowercase();
 
-    // 查表：该命令的已知 mode 列表
-    let known_modes = registry
-        .lookup(&lower_cmd)
+    // 查表：该命令的元数据和已知 mode 列表
+    let lookup_result = registry.lookup(&lower_cmd);
+
+    // 级别检查：若命令已在注册表中，验证级别是否匹配
+    if let Ok(meta) = lookup_result {
+        let user_is_system = matches!(cmd.cmd_type, CmdType::NaCommandSystem);
+        let meta_is_system = matches!(meta.level, crate::app::Level::System);
+
+        if user_is_system != meta_is_system {
+            let used_prefix = if user_is_system { "!!@" } else { "!@" };
+            let expected_prefix = if user_is_system { "!@" } else { "!!@" };
+            return Err(NashellError::NaLevelError {
+                command: cmd.cmd.clone(),
+                used_level: used_prefix.to_string(),
+                expected_level: expected_prefix.to_string(),
+            });
+        }
+    }
+
+    let known_modes = lookup_result
         .map(|meta| meta.known_modes.clone())
         .unwrap_or_default();
 
@@ -121,13 +145,13 @@ fn build_nacommand(
         (None, cmd.args.clone())
     };
 
-    NaCommand {
+    Ok(NaCommand {
         level,
         cmd: lower_cmd,
         mode,
         args,
         long_argument,
-    }
+    })
 }
 
 /// 分派命令到对应的执行器。
@@ -202,9 +226,10 @@ pub fn dispatch(cmd: &RawCmd, ctx: &mut ExecContext, out_writer: &mut dyn Write)
             let registry = ctx.registry.as_ref().ok_or_else(|| {
                 NashellError::CommandNotFound {
                     name: cmd.cmd.clone(),
+                    suggestion: None,
                 }
             })?;
-            let nacmd = build_nacommand(cmd, ctx.long_argument.clone(), registry);
+            let nacmd = build_nacommand(cmd, ctx.long_argument.clone(), registry)?;
             let output = crate::nacommand::execute_nacommand(
                 &nacmd,
                 ctx.pre_out.clone(),
@@ -385,7 +410,7 @@ mod tests {
             cmd: "Write".to_string(),
             args: vec!["Help".to_string()],
         };
-        let nacmd = build_nacommand(&cmd, None, &registry);
+        let nacmd = build_nacommand(&cmd, None, &registry).unwrap();
         assert_eq!(nacmd.cmd, "write");
         assert_eq!(nacmd.mode.as_deref(), Some("help"));
         assert!(nacmd.args.is_empty());
@@ -408,7 +433,7 @@ mod tests {
             cmd: "Write".to_string(),
             args: vec!["./test.txt".to_string()],
         };
-        let nacmd = build_nacommand(&cmd, None, &registry);
+        let nacmd = build_nacommand(&cmd, None, &registry).unwrap();
         assert_eq!(nacmd.cmd, "write");
         assert_eq!(nacmd.mode, None);
         assert_eq!(nacmd.args, vec!["./test.txt"]);
@@ -420,19 +445,19 @@ mod tests {
         let mut registry = CommandRegistry::new();
         registry.register_builtin(crate::app::CmdMeta {
             level: crate::app::Level::Normal,
-            name: "open".to_string(),
-            exec: "n_open".to_string(),
+            name: "read".to_string(),
+            exec: "n_read".to_string(),
             long_argument: false,
             exec_script: None,
             known_modes: vec!["help".to_string()],
         });
         let cmd = RawCmd {
             cmd_type: CmdType::NaCommandNormal,
-            cmd: "Open".to_string(),
+            cmd: "Read".to_string(),
             args: vec!["flake.nix".to_string()],
         };
-        let nacmd = build_nacommand(&cmd, None, &registry);
-        assert_eq!(nacmd.cmd, "open");
+        let nacmd = build_nacommand(&cmd, None, &registry).unwrap();
+        assert_eq!(nacmd.cmd, "read");
         assert_eq!(nacmd.mode, None);
         assert_eq!(nacmd.args, vec!["flake.nix"]);
     }
@@ -458,7 +483,7 @@ mod tests {
             cmd: "Shell".to_string(),
             args: vec!["Watch".to_string(), "-i".to_string(), "abc".to_string()],
         };
-        let nacmd = build_nacommand(&cmd, None, &registry);
+        let nacmd = build_nacommand(&cmd, None, &registry).unwrap();
         assert_eq!(nacmd.cmd, "shell");
         assert_eq!(nacmd.mode.as_deref(), Some("watch"));
         assert_eq!(nacmd.args, vec!["-i", "abc"]);
@@ -482,7 +507,7 @@ mod tests {
             cmd: "WebSearch".to_string(),
             args: vec!["Help".to_string()],
         };
-        let nacmd = build_nacommand(&cmd, None, &registry);
+        let nacmd = build_nacommand(&cmd, None, &registry).unwrap();
         assert_eq!(nacmd.cmd, "websearch");
         assert_eq!(nacmd.mode.as_deref(), Some("help"));
         assert!(nacmd.args.is_empty());
@@ -505,10 +530,80 @@ mod tests {
             cmd: "WebSearch".to_string(),
             args: vec!["rust".to_string(), "async".to_string(), "-n".to_string(), "5".to_string()],
         };
-        let nacmd = build_nacommand(&cmd, None, &registry);
+        let nacmd = build_nacommand(&cmd, None, &registry).unwrap();
         assert_eq!(nacmd.cmd, "websearch");
         assert_eq!(nacmd.mode, None);
         assert_eq!(nacmd.args, vec!["rust", "async", "-n", "5"]);
+    }
+
+    #[test]
+    fn test_build_nacommand_level_error_normal_for_system() {
+        // !@Bash: 使用 Normal 前缀调用 System 级命令 → NaLevelError
+        let mut registry = CommandRegistry::new();
+        registry.register_builtin(crate::app::CmdMeta {
+            level: crate::app::Level::System,
+            name: "bash".to_string(),
+            exec: "n_bash".to_string(),
+            long_argument: false,
+            exec_script: None,
+            known_modes: vec![],
+        });
+        let cmd = RawCmd {
+            cmd_type: CmdType::NaCommandNormal,
+            cmd: "Bash".to_string(),
+            args: vec!["ls".to_string()],
+        };
+        let result = build_nacommand(&cmd, None, &registry);
+        assert!(result.is_err());
+        match result {
+            Err(NashellError::NaLevelError { command: _, used_level, expected_level }) => {
+                assert_eq!(used_level, "!@");
+                assert_eq!(expected_level, "!!@");
+            }
+            _ => panic!("expected NaLevelError"),
+        }
+    }
+
+    #[test]
+    fn test_build_nacommand_level_error_system_for_normal() {
+        // !!@Write: 使用 System 前缀调用 Normal 级命令 → NaLevelError
+        let mut registry = CommandRegistry::new();
+        registry.register_builtin(crate::app::CmdMeta {
+            level: crate::app::Level::Normal,
+            name: "write".to_string(),
+            exec: "n_write".to_string(),
+            long_argument: true,
+            exec_script: None,
+            known_modes: vec![],
+        });
+        let cmd = RawCmd {
+            cmd_type: CmdType::NaCommandSystem,
+            cmd: "Write".to_string(),
+            args: vec!["./test.txt".to_string()],
+        };
+        let result = build_nacommand(&cmd, None, &registry);
+        assert!(result.is_err());
+        match result {
+            Err(NashellError::NaLevelError { command: _, used_level, expected_level }) => {
+                assert_eq!(used_level, "!!@");
+                assert_eq!(expected_level, "!@");
+            }
+            _ => panic!("expected NaLevelError"),
+        }
+    }
+
+    #[test]
+    fn test_build_nacommand_no_level_error_when_not_in_registry() {
+        // 命令不在注册表中时，不进行级别检查（build_nacommand 不报错，
+        // 后续 execute_nacommand 会报 CommandNotFound）
+        let registry = CommandRegistry::new();
+        let cmd = RawCmd {
+            cmd_type: CmdType::NaCommandNormal,
+            cmd: "UnknownCmd".to_string(),
+            args: vec![],
+        };
+        let result = build_nacommand(&cmd, None, &registry);
+        assert!(result.is_ok());
     }
 
     #[test]

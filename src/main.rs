@@ -64,8 +64,8 @@ fn main() {
     });
     registry.register_builtin(CmdMeta {
         level: Level::Normal,
-        name: "open".to_string(),
-        exec: "n_open".to_string(),
+        name: "read".to_string(),
+        exec: "n_read".to_string(),
         long_argument: false,
         exec_script: None,
         known_modes: vec!["help".to_string()],

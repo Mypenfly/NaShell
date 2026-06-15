@@ -139,6 +139,7 @@ impl CommandRegistry {
 
         Err(NashellError::CommandNotFound {
             name: cmd_name.to_string(),
+            suggestion: self.fuzzy_suggest(cmd_name),
         })
     }
 
@@ -190,7 +191,7 @@ impl CommandRegistry {
                 ),
             );
             m.insert(
-                "open".to_string(),
+                "read".to_string(),
                 format!(
                     "{}\n  打开文件或文件夹。\n\n  {}  \
                      path           目标路径（必须）\n    \
@@ -200,11 +201,11 @@ impl CommandRegistry {
                      \n    {}\n    {}\n\n  {} \
                      目标为目录时不可传入 --start/--end，否则报错。\n  \
                      {} 文件内容支持语法高亮。",
-                    style_cmd_name("Open"),
+                    style_cmd_name("Read"),
                     style_section("参数:"),
                     style_section("使用示例:"),
-                    style_code("!@Open:./src           显示目录结构树（深度 3）"),
-                    style_code("!@Open:./test.py -l 50 显示文件前 50 行（带行号+语法高亮）"),
+                    style_code("!@Read:./src           显示目录结构树（深度 3）"),
+                    style_code("!@Read:./test.py -l 50 显示文件前 50 行（带行号+语法高亮）"),
                     style_note("注意:"),
                     style_note("注意:")
                 ),
@@ -298,8 +299,105 @@ impl CommandRegistry {
 
         Err(NashellError::CommandNotFound {
             name: cmd_name.to_string(),
+            suggestion: self.fuzzy_suggest(cmd_name),
         })
     }
+
+    /// 模糊匹配命令名，返回最接近的已注册命令名。
+    ///
+    /// 使用编辑距离算法，在所有已注册命令中查找与输入最接近的匹配。
+    /// 仅当编辑距离 ≤ 2 时返回建议，否则返回 None。
+    ///
+    /// # 参数
+    /// - `cmd_name`: 用户输入的命令名称
+    ///
+    /// # 返回
+    /// - `Some(String)`: 最接近的命令名（编辑距离 ≤ 2）
+    /// - `None`: 无足够接近的匹配
+    pub fn fuzzy_suggest(&self, cmd_name: &str) -> Option<String> {
+        let lower_input = cmd_name.to_lowercase();
+        let mut best: Option<(String, usize)> = None;
+
+        let all_names: Vec<&str> = self
+            .builtin_cmds
+            .iter()
+            .chain(self.config_cmds.iter())
+            .chain(self.plugin_cmds.iter())
+            .map(|c| c.name.as_str())
+            .collect();
+
+        for name in &all_names {
+            let dist = levenshtein_distance(&lower_input, &name.to_lowercase());
+            if dist <= 2 {
+                match best {
+                    Some((_, best_dist)) if dist < best_dist => {
+                        best = Some((name.to_string(), dist));
+                    }
+                    None => {
+                        best = Some((name.to_string(), dist));
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        best.map(|(name, _)| name)
+    }
+
+    /// 收集所有已注册的命令名列表，用于 NaCmds 查询。
+    ///
+    /// # 返回
+    /// 包含所有命令名的 Vec（已去重，小写）
+    pub fn all_command_names(&self) -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
+        let mut names = Vec::new();
+        for cmd in self.builtin_cmds.iter()
+            .chain(self.config_cmds.iter())
+            .chain(self.plugin_cmds.iter())
+        {
+            let lower = cmd.name.to_lowercase();
+            if seen.insert(lower.clone()) {
+                names.push(lower);
+            }
+        }
+        names
+    }
+}
+
+/// 计算两个字符串之间的 Levenshtein 编辑距离。
+fn levenshtein_distance(s1: &str, s2: &str) -> usize {
+    let s1_chars: Vec<char> = s1.chars().collect();
+    let s2_chars: Vec<char> = s2.chars().collect();
+    let len1 = s1_chars.len();
+    let len2 = s2_chars.len();
+
+    if len1 == 0 {
+        return len2;
+    }
+    if len2 == 0 {
+        return len1;
+    }
+
+    // 使用两行优化空间的 DP
+    let mut prev: Vec<usize> = (0..=len2).collect();
+    let mut curr = vec![0usize; len2 + 1];
+
+    for i in 1..=len1 {
+        curr[0] = i;
+        for j in 1..=len2 {
+            let cost = if s1_chars[i - 1] == s2_chars[j - 1] {
+                0
+            } else {
+                1
+            };
+            curr[j] = (prev[j] + 1)
+                .min(curr[j - 1] + 1)
+                .min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+
+    prev[len2]
 }
 
 #[cfg(test)]
@@ -358,7 +456,7 @@ mod tests {
         let result = registry.lookup("nonexistent");
         assert!(result.is_err());
         match result {
-            Err(crate::error::NashellError::CommandNotFound { name }) => {
+            Err(crate::error::NashellError::CommandNotFound { name, suggestion: _ }) => {
                 assert_eq!(name, "nonexistent");
             }
             _ => panic!("expected CommandNotFound error"),
@@ -402,8 +500,8 @@ mod tests {
         });
         registry.builtin_cmds.push(CmdMeta {
             level: Level::Normal,
-            name: "open".to_string(),
-            exec: "n_open".to_string(),
+            name: "read".to_string(),
+            exec: "n_read".to_string(),
             long_argument: false,
             exec_script: None,
             known_modes: vec![],
@@ -411,7 +509,7 @@ mod tests {
 
         assert_eq!(registry.builtin_cmds.len(), 2);
         assert!(registry.lookup("write").is_ok());
-        assert!(registry.lookup("open").is_ok());
+        assert!(registry.lookup("read").is_ok());
     }
 
     #[test]
@@ -571,5 +669,134 @@ mod tests {
         let (meta, source) = registry.lookup_with_source("mycmd").unwrap();
         assert_eq!(meta.exec, "my_config_exec");
         assert_eq!(source, LookupSource::Config);
+    }
+
+    #[test]
+    fn test_fuzzy_suggest_exact_match() {
+        let mut registry = CommandRegistry::new();
+        registry.builtin_cmds.push(CmdMeta {
+            level: Level::Normal,
+            name: "write".to_string(),
+            exec: "n_write".to_string(),
+            long_argument: true,
+            exec_script: None,
+            known_modes: vec![],
+        });
+        let suggestion = registry.fuzzy_suggest("write");
+        assert_eq!(suggestion, Some("write".to_string()));
+    }
+
+    #[test]
+    fn test_fuzzy_suggest_one_char_typo() {
+        let mut registry = CommandRegistry::new();
+        registry.builtin_cmds.push(CmdMeta {
+            level: Level::Normal,
+            name: "write".to_string(),
+            exec: "n_write".to_string(),
+            long_argument: true,
+            exec_script: None,
+            known_modes: vec![],
+        });
+        registry.builtin_cmds.push(CmdMeta {
+            level: Level::Normal,
+            name: "bash".to_string(),
+            exec: "n_bash".to_string(),
+            long_argument: false,
+            exec_script: None,
+            known_modes: vec![],
+        });
+        // "writ" → closest is "write" (distance 1)
+        let suggestion = registry.fuzzy_suggest("writ");
+        assert_eq!(suggestion, Some("write".to_string()));
+    }
+
+    #[test]
+    fn test_fuzzy_suggest_typo_with_extra_char() {
+        let mut registry = CommandRegistry::new();
+        registry.builtin_cmds.push(CmdMeta {
+            level: Level::Normal,
+            name: "write".to_string(),
+            exec: "n_write".to_string(),
+            long_argument: true,
+            exec_script: None,
+            known_modes: vec![],
+        });
+        // "writed" → "write" (distance 1: delete d)
+        let suggestion = registry.fuzzy_suggest("writed");
+        assert_eq!(suggestion, Some("write".to_string()));
+    }
+
+    #[test]
+    fn test_fuzzy_suggest_too_far() {
+        let mut registry = CommandRegistry::new();
+        registry.builtin_cmds.push(CmdMeta {
+            level: Level::Normal,
+            name: "write".to_string(),
+            exec: "n_write".to_string(),
+            long_argument: true,
+            exec_script: None,
+            known_modes: vec![],
+        });
+        // "wxyzefg" → distance too large → None
+        let suggestion = registry.fuzzy_suggest("wxyzefg");
+        assert_eq!(suggestion, None);
+    }
+
+    #[test]
+    fn test_fuzzy_suggest_na_cmd_typo() {
+        let mut registry = CommandRegistry::new();
+        registry.builtin_cmds.push(CmdMeta {
+            level: Level::System,
+            name: "nacmds".to_string(),
+            exec: "n_nacmds".to_string(),
+            long_argument: false,
+            exec_script: None,
+            known_modes: vec![],
+        });
+        registry.builtin_cmds.push(CmdMeta {
+            level: Level::Normal,
+            name: "write".to_string(),
+            exec: "n_write".to_string(),
+            long_argument: true,
+            exec_script: None,
+            known_modes: vec![],
+        });
+        // "NaCmd" → closest is "nacmds" (distance 2)
+        let suggestion = registry.fuzzy_suggest("NaCmd");
+        assert_eq!(suggestion, Some("nacmds".to_string()));
+    }
+
+    #[test]
+    fn test_levenshtein_distance_basic() {
+        assert_eq!(levenshtein_distance("cat", "cat"), 0);
+        assert_eq!(levenshtein_distance("cat", "cats"), 1);
+        assert_eq!(levenshtein_distance("cat", "cut"), 1);
+        assert_eq!(levenshtein_distance("kitten", "sitting"), 3);
+        assert_eq!(levenshtein_distance("", "abc"), 3);
+        assert_eq!(levenshtein_distance("abc", ""), 3);
+    }
+
+    #[test]
+    fn test_all_command_names() {
+        let mut registry = CommandRegistry::new();
+        registry.builtin_cmds.push(CmdMeta {
+            level: Level::Normal,
+            name: "write".to_string(),
+            exec: "n_write".to_string(),
+            long_argument: true,
+            exec_script: None,
+            known_modes: vec![],
+        });
+        registry.config_cmds.push(CmdMeta {
+            level: Level::Normal,
+            name: "search".to_string(),
+            exec: "python3 ./search.py".to_string(),
+            long_argument: false,
+            exec_script: None,
+            known_modes: vec![],
+        });
+        let names = registry.all_command_names();
+        assert!(names.contains(&"write".to_string()));
+        assert!(names.contains(&"search".to_string()));
     }
 }

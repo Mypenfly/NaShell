@@ -34,6 +34,7 @@ pub fn execute_toplevel(
     deny_patterns: &[String],
     registry: &CommandRegistry,
     shell_manager: Option<Arc<Mutex<ShellManager>>>,
+    is_print: bool,
 ) -> Result<Vec<String>, NashellError> {
     let mut results = Vec::with_capacity(to_exec.len());
     let depth_exceeded = depth >= TOEXEC_MAX_DEPTH;
@@ -76,6 +77,7 @@ pub fn execute_toplevel(
                 registry,
                 shell_manager.as_ref(),
                 depth_exceeded,
+                is_print,
             ));
         } else {
             // 有管道：captured 逐段 dispatch
@@ -95,7 +97,7 @@ pub fn execute_toplevel(
     Ok(results)
 }
 
-/// 执行单个无管道命令（直连模式优先）。
+/// 执行单个无管道命令（根据 is_print 选择流式或纯捕获模式）。
 fn execute_single_direct(
     raw_cmd: &crate::parser::syntax::RawCmd,
     cmd_line: &str,
@@ -106,6 +108,7 @@ fn execute_single_direct(
     registry: &CommandRegistry,
     shell_manager: Option<&Arc<Mutex<ShellManager>>>,
     depth_exceeded: bool,
+    is_print: bool,
 ) -> String {
     use crate::parser::syntax::CmdType;
 
@@ -130,10 +133,27 @@ fn execute_single_direct(
                     Ok(()) => format!("{annotation}\n(direct: cd)"),
                     Err(e) => crate::error::display::format_error(&e),
                 }
-            } else {
-                // 流式捕获：实时输出到终端同时收集完整结果
+            } else if is_print {
+                // is_print=true: 流式捕获——实时输出到终端同时收集结果
                 match shell_exec::exec_captured_streaming(
                     &raw_cmd.cmd, &raw_cmd.args, shell_type, timeout_secs,
+                ) {
+                    Ok(output) => {
+                        let mut text = output.stdout;
+                        if !output.stderr.is_empty() {
+                            if !text.is_empty() {
+                                text.push('\n');
+                            }
+                            text.push_str(&output.stderr);
+                        }
+                        format!("{annotation}\n{}", text.trim())
+                    }
+                    Err(e) => crate::error::display::format_error(&e),
+                }
+            } else {
+                // is_print=false: 纯捕获——不输出到终端，只收集结果
+                match shell_exec::exec_captured(
+                    &raw_cmd.cmd, &raw_cmd.args, shell_type, timeout_secs, None,
                 ) {
                     Ok(output) => {
                         let mut text = output.stdout;
@@ -287,6 +307,7 @@ mod tests {
         let to_exec = vec!["echo hello_world".to_string()];
         let results = execute_toplevel(
             &to_exec, 0, "bash", 120, &[], &registry, None,
+            true,
         ).unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].contains("hello_world"));
@@ -298,6 +319,7 @@ mod tests {
         let to_exec = vec!["echo hello | grep hello".to_string()];
         let results = execute_toplevel(
             &to_exec, 0, "bash", 120, &[], &registry, None,
+            true,
         ).unwrap();
         assert_eq!(results.len(), 1);
         // Captured mode: shows actual output
@@ -316,6 +338,7 @@ mod tests {
         )];
         let results = execute_toplevel(
             &to_exec, 0, "bash", 120, &[], &registry, None,
+            true,
         ).unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].contains("write to"));
@@ -330,6 +353,7 @@ mod tests {
         let to_exec = vec!["!@Write:./test.txt @/\ntest".to_string()];
         let results = execute_toplevel(
             &to_exec, TOEXEC_MAX_DEPTH, "bash", 120, &[], &registry, None,
+            true,
         ).unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].contains("递归深度超过限制"));
@@ -341,6 +365,7 @@ mod tests {
         let to_exec = vec!["echo still_works".to_string()];
         let results = execute_toplevel(
             &to_exec, TOEXEC_MAX_DEPTH, "bash", 120, &[], &registry, None,
+            true,
         ).unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].contains("still_works"));
@@ -359,6 +384,7 @@ mod tests {
         ];
         let results = execute_toplevel(
             &to_exec, 0, "bash", 120, &[], &registry, None,
+            true,
         ).unwrap();
         assert_eq!(results.len(), 2);
         assert!(results[0].contains("write to"));
@@ -372,6 +398,7 @@ mod tests {
         let registry = test_registry();
         let results = execute_toplevel(
             &[], 0, "bash", 120, &[], &registry, None,
+            true,
         ).unwrap();
         assert!(results.is_empty());
     }
@@ -382,6 +409,7 @@ mod tests {
         let to_exec = vec!["'unclosed quote".to_string()];
         let results = execute_toplevel(
             &to_exec, 0, "bash", 120, &[], &registry, None,
+            true,
         ).unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].contains("@Error"));
@@ -395,6 +423,7 @@ mod tests {
         let deny: Vec<String> = vec!["rm -rf /".to_string()];
         let result = execute_toplevel(
             &to_exec, 0, "bash", 120, &deny, &registry, None,
+            true,
         );
         assert!(result.is_err());
     }
@@ -411,6 +440,7 @@ mod tests {
         ];
         let results = execute_toplevel(
             &to_exec, 0, "bash", 120, &[], &registry, None,
+            true,
         ).unwrap();
         assert_eq!(results.len(), 2);
         assert!(results[0].contains("write to"));

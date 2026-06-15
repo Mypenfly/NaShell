@@ -4,8 +4,9 @@
 支持命令：
   !@Demo:Echo <name>             简单输出反馈
   !@Demo:Stream [-c <n>]         流式进度条输出
-  !@Demo:Exec <cmd>              toExec 单命令 + 结果反馈
+  !@Demo:Exec <cmd>              toExec 单命令 + 结果回传
   !@Demo:MultiExec <cmd...>      toExec 多命令 + 格式化结果
+  !@Demo:Silent <cmd>            toExec is_print=false 演示
   !@Demo:Confirm                 交互式输入（get_input）
   !@Demo:Help                    帮助信息
 """
@@ -35,7 +36,11 @@ def _send(msg: dict):
 
 def send_response(streaming: bool, content: str = "", prompt: str | None = None,
                   prompt_fg: str = "gray", is_print: bool = True,
-                  to_exec: list | None = None, get_input: dict | None = None):
+                  to_exec: dict | None = None, get_input: dict | None = None):
+    """发送 response 消息。
+    
+    to_exec 格式: {"execs": [...], "is_print": bool, "timeout": int}
+    """
     _send({
         "type": "response",
         "sender": SENDER,
@@ -45,7 +50,7 @@ def send_response(streaming: bool, content: str = "", prompt: str | None = None,
             "out_prompt": prompt,
             "prompt_fg": prompt_fg,
             "is_print": is_print,
-            "to_exec": to_exec or [],
+            "to_exec": to_exec,
             "exec_result": None,
             "get_input": get_input,
             "user_input": None,
@@ -55,12 +60,16 @@ def send_response(streaming: bool, content: str = "", prompt: str | None = None,
 
 def send_off(content: str = "", prompt: str | None = None,
              prompt_fg: str = "gray", is_print: bool = True,
-             to_exec: list | None = None):
+             to_exec: dict | None = None):
+    """发送 off 消息结束本次 call。
+    
+    to_exec 格式: {"execs": [...], "is_print": bool, "timeout": int}
+    """
     _send({
         "type": "off",
         "sender": SENDER,
         "data": {
-            "to_exec": to_exec or [],
+            "to_exec": to_exec,
             "out_content": content,
             "out_prompt": prompt,
             "prompt_fg": prompt_fg,
@@ -70,6 +79,7 @@ def send_off(content: str = "", prompt: str | None = None,
 
 
 def recv_message() -> dict | None:
+    """从 stdin 读取一条有效的 call 或 response 消息。"""
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -120,20 +130,31 @@ def handle_demo(mode: str, params: list, long_arg: str | None):
         return
 
     if mode == "exec":
+        # toExec 单命令：is_print=True → 结果实时显示在终端
         cmd = params[0] if params else "echo 'no command'"
         send_response(True, f"{BC}→ toExec: {cmd}{R}", is_print=True,
-                      to_exec=[cmd])
+                      to_exec={"execs": [cmd], "is_print": True, "timeout": 90})
         return  # 结果在 response 分支处理
 
     if mode == "multiexec":
+        # toExec 多命令：is_print=True → 每条结果实时显示
         cmds = params if params else ["echo a", "echo b", "echo c"]
         send_response(True,
                       f"{BC}→ 批量 toExec ({len(cmds)} 条){R}",
-                      is_print=True, to_exec=cmds)
+                      is_print=True,
+                      to_exec={"execs": cmds, "is_print": True, "timeout": 90})
         return
 
+    if mode == "silent":
+        # toExec is_print=False → 结果不回显，只捕获回传
+        cmd = params[0] if params else "echo 'secret result'"
+        send_response(True,
+                      f"{BC}→ 静默 toExec (is_print=false): {cmd}{R}",
+                      is_print=True,
+                      to_exec={"execs": [cmd], "is_print": False, "timeout": 30})
+        return  # 静默执行的结果在 response 分支接收
+
     if mode == "confirm":
-        # 交互式输入示例
         send_response(True, "", is_print=False,
                       get_input={
                           "pre_content": "这是一个危险操作",
@@ -153,8 +174,9 @@ HELP = f"""
 {B}模式:{R}
   {G}echo{R}        简单问候（args[0] 为名字）
   {G}stream{R}      流式进度条 (-c <n>)
-  {G}exec{R}        toExec 单命令执行，结果回传并格式化
-  {G}multiexec{R}   toExec 多命令执行，结果带标注回传
+  {G}exec{R}        toExec 单命令执行（is_print=true，结果实时显示）
+  {G}multiexec{R}   toExec 多命令执行（is_print=true）
+  {G}silent{R}      toExec 静默执行（is_print=false，结果回传后由插件格式化输出）
   {G}confirm{R}     交互式输入示例（get_input）
   {G}help{R}        本帮助
 
@@ -163,6 +185,7 @@ HELP = f"""
   !@Demo:Stream -c 10
   !@Demo:Exec ls -la
   !@Demo:MultiExec echo A echo B
+  !@Demo:Silent date
   !@Demo:Confirm
 """
 
@@ -184,16 +207,18 @@ def main():
             user_input = data.get("user_input")
 
             if exec_result:
+                # 收集到 toExec 的执行结果，格式化后输出
                 lines = [f"{BG}── toExec 结果 ({len(exec_result)} 条) ──{R}"]
                 for i, r in enumerate(exec_result):
-                    lines.append(r)
+                    if r.strip():
+                        lines.append(f"  {BC}[{i + 1}]{R} {r.strip()}")
                 send_off("\n".join(lines), prompt="@demo #>", prompt_fg="gray")
                 continue
 
             if user_input is not None:
                 lines = [
                     f"{BG}── 收到用户输入 ──{R}",
-                    f"{BC}{user_input}{R}",
+                    f"  {BC}{user_input}{R}",
                 ]
                 send_off("\n".join(lines), prompt="@demo #>", prompt_fg="gray")
                 continue
@@ -209,7 +234,7 @@ def main():
         params = data.get("params", [])
         long_arg = data.get("long_argument")
 
-        # 从 params[0] 提取实际 mode
+        # 从 params[0] 提取实际 mode（插件命令 known_modes 为空，mode 在 params[0]）
         if mode == "normal" and params and not params[0].startswith("-"):
             mode = params[0].lower()
             params = params[1:]
